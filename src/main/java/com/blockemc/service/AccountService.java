@@ -4,11 +4,14 @@ import com.blockemc.model.PluginSettings;
 import com.blockemc.model.StorageSettings;
 import com.blockemc.service.audit.PendingSellStatus;
 import com.blockemc.service.audit.PendingSellTransaction;
+import com.blockemc.service.audit.PendingSellRecoveryAction;
+import com.blockemc.service.audit.PendingSellRecoveryPolicy;
 import com.blockemc.service.audit.TransactionAuditRecord;
 import com.blockemc.service.storage.AccountSnapshot;
 import com.blockemc.service.storage.AccountStorage;
 import com.blockemc.service.storage.AccountStorageException;
 import com.blockemc.service.storage.MySqlAccountStorage;
+import com.blockemc.service.storage.PendingCreditResult;
 import com.blockemc.service.storage.PlayerAccountState;
 import com.blockemc.service.storage.SharedAccountGlobalState;
 import com.blockemc.service.storage.SharedAccountStorage;
@@ -523,6 +526,47 @@ public final class AccountService {
         });
     }
 
+    public CompletableFuture<PendingCreditResult> completePendingSellCredit(PendingSellTransaction transaction) {
+        return supplyAccountIO(() -> {
+            try {
+                SharedAccountStorage sharedStorage = sharedStorage();
+                PendingCreditResult result = sharedStorage == null
+                        ? completeLocalPendingSellCredit(transaction)
+                        : sharedStorage.completePendingSellCredit(transaction, pluginSettings.maxBalance());
+                if (result == PendingCreditResult.SUCCESS) {
+                    long balance = sharedStorage == null
+                            ? balances.getOrDefault(transaction.playerUuid(), globalBalances.getOrDefault(transaction.playerUuid(), 0L))
+                            : sharedStorage.getBalance(transaction.playerUuid());
+                    synchronized (this) {
+                        names.put(transaction.playerUuid(), transaction.playerName());
+                        balances.put(transaction.playerUuid(), balance);
+                        globalNames.put(transaction.playerUuid(), transaction.playerName());
+                        globalBalances.put(transaction.playerUuid(), balance);
+                    }
+                }
+                return result;
+            } catch (AccountStorageException exception) {
+                throw new CompletionException(exception);
+            }
+        });
+    }
+
+    public PendingCreditResult completePendingSellCreditForTesting(PendingSellTransaction transaction) {
+        try {
+            return completeLocalPendingSellCredit(transaction);
+        } catch (AccountStorageException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
+    public void recoverPendingSellForTesting(PendingSellTransaction transaction) {
+        try {
+            recoverPendingSell(transaction);
+        } catch (AccountStorageException exception) {
+            throw new IllegalStateException(exception);
+        }
+    }
+
     public void recoverPendingSells() {
         executor.execute(() -> {
             try {
@@ -729,7 +773,7 @@ public final class AccountService {
         YamlConfiguration configuration = loadPendingConfiguration();
         ConfigurationSection section = configuration.getConfigurationSection("transactions." + transactionId);
         if (section == null) {
-            return;
+            throw new AccountStorageException("Pending sell transaction not found: " + transactionId);
         }
         section.set("status", status.name());
         section.set("updated-at", java.time.Instant.now().toString());
@@ -750,7 +794,7 @@ public final class AccountService {
                 continue;
             }
             PendingSellStatus status = parsePendingStatus(section.getString("status"));
-            if (status != PendingSellStatus.PENDING_REMOVAL && status != PendingSellStatus.ITEMS_REMOVED) {
+            if (!PendingSellRecoveryPolicy.isOpen(status)) {
                 continue;
             }
             try {
@@ -775,7 +819,8 @@ public final class AccountService {
                         status,
                         parseInstant(section.getString("created-at")),
                         parseInstant(section.getString("updated-at")),
-                        section.getString("failure-reason", "")
+                        section.getString("failure-reason", ""),
+                        section.getString("server-name", "")
                 ));
             } catch (IllegalArgumentException exception) {
                 plugin.getLogger().warning("Skipping invalid pending sell transaction in YAML: " + id);
@@ -785,47 +830,51 @@ public final class AccountService {
     }
 
     private void recoverPendingSell(PendingSellTransaction transaction) throws AccountStorageException {
-        if (transaction.status() == PendingSellStatus.PENDING_REMOVAL) {
-            updateRecoveredPending(transaction.transactionId(), PendingSellStatus.FAILED, "server stopped before item removal");
-            plugin.getLogger().warning("Marked pending sell " + transaction.transactionId() + " as failed because item removal had not started.");
-            return;
-        }
-        if (transaction.status() != PendingSellStatus.ITEMS_REMOVED) {
-            return;
-        }
-        boolean credited = creditRecoveredPending(transaction);
-        if (credited) {
-            updateRecoveredPending(transaction.transactionId(), PendingSellStatus.SUCCESS, "recovered after restart");
-            plugin.getLogger().warning("Recovered pending sell " + transaction.transactionId() + " by crediting EMC after restart.");
-        } else {
-            updateRecoveredPending(transaction.transactionId(), PendingSellStatus.FAILED, "recovery credit failed");
-            plugin.getLogger().severe("Failed to recover pending sell " + transaction.transactionId() + "; manual audit required.");
+        switch (PendingSellRecoveryPolicy.actionFor(transaction.status())) {
+            case FAIL_SAFE_BEFORE_REMOVAL -> {
+                updateRecoveredPending(transaction.transactionId(), PendingSellStatus.FAILED, "server stopped before item removal");
+                plugin.getLogger().warning("Marked pending sell " + transaction.transactionId() + " as failed because item removal had not started.");
+            }
+            case MANUAL_REVIEW_ITEM_REMOVAL_UNCERTAIN -> {
+                updateRecoveredPending(transaction.transactionId(), PendingSellStatus.MANUAL_REVIEW, "server stopped while removing items");
+                logManualReview(transaction, "item removal may or may not have completed; no automatic credit or failure was applied");
+            }
+            case CREDIT_REMOVED_ITEMS -> {
+                PendingCreditResult credited = creditRecoveredPending(transaction);
+                if (credited == PendingCreditResult.SUCCESS) {
+                    plugin.getLogger().warning("Recovered pending sell " + transaction.transactionId() + " by crediting EMC after restart.");
+                } else {
+                    updateRecoveredPending(transaction.transactionId(), PendingSellStatus.MANUAL_REVIEW, "recovery credit failed: " + credited);
+                    logManualReview(transaction, "items were already removed but recovery credit failed: " + credited);
+                }
+            }
+            case MANUAL_REVIEW_CREDIT_UNCERTAIN -> {
+                updateRecoveredPending(transaction.transactionId(), PendingSellStatus.MANUAL_REVIEW, "server stopped while crediting balance");
+                logManualReview(transaction, "balance may or may not have been credited; automatic duplicate credit is blocked");
+            }
+            case IGNORE_TERMINAL -> {
+            }
         }
     }
 
-    private boolean creditRecoveredPending(PendingSellTransaction transaction) throws AccountStorageException {
+    private PendingCreditResult creditRecoveredPending(PendingSellTransaction transaction) throws AccountStorageException {
         SharedAccountStorage sharedStorage = sharedStorage();
         if (sharedStorage != null) {
-            return sharedStorage.tryAddBalance(transaction.playerUuid(), transaction.playerName(), transaction.reward(), pluginSettings.maxBalance());
-        }
-        synchronized (this) {
-            AccountSnapshot before = snapshotLocked();
-            try {
-                long current = balances.getOrDefault(transaction.playerUuid(), globalBalances.getOrDefault(transaction.playerUuid(), 0L));
-                long next = AmountUtil.checkedAddBalance(current, transaction.reward(), pluginSettings.maxBalance());
-                names.put(transaction.playerUuid(), transaction.playerName());
-                balances.put(transaction.playerUuid(), next);
-                globalNames.put(transaction.playerUuid(), transaction.playerName());
-                globalBalances.put(transaction.playerUuid(), next);
-                copyLocalToGlobalLocked();
-                saveLocalSnapshotLocked();
-                return true;
-            } catch (ArithmeticException | AccountStorageException exception) {
-                populateLocalStateLocked(before);
-                copyLocalToGlobalLocked();
-                return false;
+            updateRecoveredPending(transaction.transactionId(), PendingSellStatus.CREDITING, "recovery credit started");
+            PendingCreditResult result = sharedStorage.completePendingSellCredit(transaction.withStatus(PendingSellStatus.CREDITING, "recovery credit started"), pluginSettings.maxBalance());
+            if (result == PendingCreditResult.SUCCESS) {
+                long balance = sharedStorage.getBalance(transaction.playerUuid());
+                synchronized (this) {
+                    names.put(transaction.playerUuid(), transaction.playerName());
+                    balances.put(transaction.playerUuid(), balance);
+                    globalNames.put(transaction.playerUuid(), transaction.playerName());
+                    globalBalances.put(transaction.playerUuid(), balance);
+                }
             }
+            return result;
         }
+        updateRecoveredPending(transaction.transactionId(), PendingSellStatus.CREDITING, "recovery credit started");
+        return completeLocalPendingSellCredit(transaction.withStatus(PendingSellStatus.CREDITING, "recovery credit started"));
     }
 
     private void updateRecoveredPending(String transactionId, PendingSellStatus status, String reason) throws AccountStorageException {
@@ -835,6 +884,64 @@ public final class AccountService {
         } else {
             updateLocalPendingSellStatus(transactionId, status, reason);
         }
+    }
+
+    private PendingCreditResult completeLocalPendingSellCredit(PendingSellTransaction transaction) throws AccountStorageException {
+        synchronized (this) {
+            AccountSnapshot before = snapshotLocked();
+            try {
+                PendingSellStatus persistedStatus = loadLocalPendingSellStatus(transaction.transactionId());
+                if (persistedStatus != PendingSellStatus.CREDITING) {
+                    return PendingCreditResult.MANUAL_REVIEW_REQUIRED;
+                }
+                long current = balances.getOrDefault(transaction.playerUuid(), globalBalances.getOrDefault(transaction.playerUuid(), 0L));
+                long next = AmountUtil.checkedAddBalance(current, transaction.reward(), pluginSettings.maxBalance());
+                names.put(transaction.playerUuid(), transaction.playerName());
+                balances.put(transaction.playerUuid(), next);
+                globalNames.put(transaction.playerUuid(), transaction.playerName());
+                globalBalances.put(transaction.playerUuid(), next);
+                copyLocalToGlobalLocked();
+                saveLocalSnapshotLocked();
+                try {
+                    updateLocalPendingSellStatus(transaction.transactionId(), PendingSellStatus.SUCCESS, "");
+                    return PendingCreditResult.SUCCESS;
+                } catch (AccountStorageException exception) {
+                    plugin.getLogger().log(
+                            Level.SEVERE,
+                            "Local pending sell credit was applied but SUCCESS state failed to persist: " + transaction.transactionId(),
+                            exception
+                    );
+                    return PendingCreditResult.MANUAL_REVIEW_REQUIRED;
+                }
+            } catch (ArithmeticException exception) {
+                populateLocalStateLocked(before);
+                copyLocalToGlobalLocked();
+                return PendingCreditResult.REJECTED;
+            } catch (AccountStorageException exception) {
+                populateLocalStateLocked(before);
+                copyLocalToGlobalLocked();
+                throw exception;
+            }
+        }
+    }
+
+    private PendingSellStatus loadLocalPendingSellStatus(String transactionId) {
+        YamlConfiguration configuration = loadPendingConfiguration();
+        return parsePendingStatus(configuration.getString("transactions." + transactionId + ".status"));
+    }
+
+    private void logManualReview(PendingSellTransaction transaction, String reason) {
+        plugin.getLogger().severe(
+                "Pending sell requires manual review: transactionId=" + transaction.transactionId()
+                        + ", playerUuid=" + transaction.playerUuid()
+                        + ", playerName=" + transaction.playerName()
+                        + ", operationType=" + transaction.operationType()
+                        + ", materials=" + transaction.materials()
+                        + ", reward=" + transaction.reward()
+                        + ", status=" + transaction.status()
+                        + ", serverName=" + transaction.serverName()
+                        + ", reason=" + reason
+        );
     }
 
     private void writePendingSection(YamlConfiguration configuration, PendingSellTransaction transaction) {
@@ -849,6 +956,7 @@ public final class AccountService {
         section.set("created-at", transaction.createdAt().toString());
         section.set("updated-at", transaction.updatedAt().toString());
         section.set("failure-reason", transaction.failureReason());
+        section.set("server-name", transaction.serverName());
     }
 
     private YamlConfiguration loadPendingConfiguration() {

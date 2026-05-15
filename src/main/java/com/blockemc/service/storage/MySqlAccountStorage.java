@@ -15,6 +15,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.LocalDate;
+import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -306,9 +307,9 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
     @Override
     public void savePendingSell(PendingSellTransaction transaction) throws AccountStorageException {
         String sql = "INSERT INTO " + quoted(pendingTransactionsTable) + " ("
-                + "transaction_id, player_uuid, player_name, operation_type, materials, reward, status, created_at, updated_at, failure_reason"
-                + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                + "ON DUPLICATE KEY UPDATE status = VALUES(status), updated_at = VALUES(updated_at), failure_reason = VALUES(failure_reason)";
+                + "transaction_id, player_uuid, player_name, operation_type, materials, reward, status, created_at, updated_at, failure_reason, server_name"
+                + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE status = VALUES(status), updated_at = VALUES(updated_at), failure_reason = VALUES(failure_reason), server_name = VALUES(server_name)";
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, transaction.transactionId());
@@ -321,6 +322,7 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
             statement.setString(8, transaction.createdAt().toString());
             statement.setString(9, transaction.updatedAt().toString());
             statement.setString(10, transaction.failureReason());
+            statement.setString(11, transaction.serverName());
             statement.executeUpdate();
         } catch (SQLException exception) {
             throw new AccountStorageException("Failed to save MySQL pending sell transaction", exception);
@@ -337,21 +339,81 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
             statement.setString(2, java.time.Instant.now().toString());
             statement.setString(3, reason == null ? "" : reason);
             statement.setString(4, transactionId);
-            statement.executeUpdate();
+            if (statement.executeUpdate() != 1) {
+                throw new AccountStorageException("Pending sell transaction not found: " + transactionId);
+            }
         } catch (SQLException exception) {
             throw new AccountStorageException("Failed to update MySQL pending sell transaction", exception);
         }
     }
 
     @Override
+    public PendingCreditResult completePendingSellCredit(
+            PendingSellTransaction transaction,
+            long maxBalance
+    ) throws AccountStorageException {
+        if (transaction == null || transaction.reward() <= 0L || transaction.reward() > maxBalance) {
+            return PendingCreditResult.REJECTED;
+        }
+        try (Connection connection = openConnection()) {
+            boolean originalAutoCommit = connection.getAutoCommit();
+            connection.setAutoCommit(false);
+            try {
+                ensureAccountRow(connection, transaction.playerUuid(), transaction.playerName());
+                PendingSellStatus status = selectPendingStatusForUpdate(connection, transaction.transactionId());
+                if (status != PendingSellStatus.CREDITING) {
+                    connection.rollback();
+                    return PendingCreditResult.MANUAL_REVIEW_REQUIRED;
+                }
+                boolean added = addBalanceInTransaction(
+                        connection,
+                        transaction.playerUuid(),
+                        transaction.playerName(),
+                        transaction.reward(),
+                        maxBalance
+                );
+                if (!added) {
+                    connection.rollback();
+                    return PendingCreditResult.REJECTED;
+                }
+                boolean completed = updatePendingSellStatusInTransaction(
+                        connection,
+                        transaction.transactionId(),
+                        PendingSellStatus.SUCCESS,
+                        ""
+                );
+                if (!completed) {
+                    connection.rollback();
+                    return PendingCreditResult.MANUAL_REVIEW_REQUIRED;
+                }
+                connection.commit();
+                return PendingCreditResult.SUCCESS;
+            } catch (SQLException exception) {
+                try {
+                    connection.rollback();
+                } catch (SQLException rollbackFailure) {
+                    exception.addSuppressed(rollbackFailure);
+                }
+                throw exception;
+            } finally {
+                connection.setAutoCommit(originalAutoCommit);
+            }
+        } catch (SQLException exception) {
+            throw new AccountStorageException("Failed to complete MySQL pending sell credit transaction", exception);
+        }
+    }
+
+    @Override
     public List<PendingSellTransaction> loadOpenPendingSells() throws AccountStorageException {
-        String sql = "SELECT transaction_id, player_uuid, player_name, operation_type, materials, reward, status, created_at, updated_at, failure_reason "
-                + "FROM " + quoted(pendingTransactionsTable) + " WHERE status IN (?, ?)";
+        String sql = "SELECT transaction_id, player_uuid, player_name, operation_type, materials, reward, status, created_at, updated_at, failure_reason, server_name "
+                + "FROM " + quoted(pendingTransactionsTable) + " WHERE status IN (?, ?, ?, ?)";
         List<PendingSellTransaction> transactions = new ArrayList<>();
         try (Connection connection = openConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, PendingSellStatus.PENDING_REMOVAL.name());
-            statement.setString(2, PendingSellStatus.ITEMS_REMOVED.name());
+            statement.setString(2, PendingSellStatus.REMOVING_ITEMS.name());
+            statement.setString(3, PendingSellStatus.ITEMS_REMOVED.name());
+            statement.setString(4, PendingSellStatus.CREDITING.name());
             try (ResultSet resultSet = statement.executeQuery()) {
                 while (resultSet.next()) {
                     UUID uniqueId = parseUuid(resultSet.getString("player_uuid"));
@@ -368,7 +430,8 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
                             PendingSellStatus.valueOf(resultSet.getString("status")),
                             parseInstant(resultSet.getString("created_at")),
                             parseInstant(resultSet.getString("updated_at")),
-                            resultSet.getString("failure_reason")
+                            resultSet.getString("failure_reason"),
+                            resultSet.getString("server_name")
                     ));
                 }
             }
@@ -527,9 +590,16 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
                         status VARCHAR(32) NOT NULL,
                         created_at VARCHAR(64) NOT NULL,
                         updated_at VARCHAR(64) NOT NULL,
-                        failure_reason VARCHAR(255) NOT NULL
+                        failure_reason VARCHAR(255) NOT NULL,
+                        server_name VARCHAR(64) NOT NULL DEFAULT ''
                     )
                     """.formatted(quoted(pendingTransactionsTable)));
+            addColumnIfMissing(
+                    connection,
+                    pendingTransactionsTable,
+                    "server_name",
+                    "VARCHAR(64) NOT NULL DEFAULT ''"
+            );
         }
     }
 
@@ -892,6 +962,80 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
             statement.setString(1, uniqueId.toString());
             statement.setString(2, normalizeName(uniqueId, name));
             statement.executeUpdate();
+        }
+    }
+
+    private void addColumnIfMissing(
+            Connection connection,
+            String table,
+            String column,
+            String definition
+    ) throws SQLException {
+        String sql = "ALTER TABLE " + quoted(table) + " ADD COLUMN " + column + " " + definition;
+        try (Statement statement = connection.createStatement()) {
+            statement.executeUpdate(sql);
+        } catch (SQLException exception) {
+            String state = exception.getSQLState();
+            int errorCode = exception.getErrorCode();
+            if ("42S21".equals(state) || errorCode == 1060) {
+                return;
+            }
+            throw exception;
+        }
+    }
+
+    private PendingSellStatus selectPendingStatusForUpdate(Connection connection, String transactionId) throws SQLException {
+        String sql = "SELECT status FROM " + quoted(pendingTransactionsTable) + " WHERE transaction_id = ? FOR UPDATE";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, transactionId);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                if (!resultSet.next()) {
+                    return null;
+                }
+                try {
+                    return PendingSellStatus.valueOf(resultSet.getString("status"));
+                } catch (IllegalArgumentException exception) {
+                    return PendingSellStatus.MANUAL_REVIEW;
+                }
+            }
+        }
+    }
+
+    private boolean addBalanceInTransaction(
+            Connection connection,
+            UUID uniqueId,
+            String name,
+            long amount,
+            long maxBalance
+    ) throws SQLException {
+        if (amount <= 0L || amount > maxBalance) {
+            return false;
+        }
+        String sql = "UPDATE " + quoted(accountsTable)
+                + " SET player_name = ?, balance = balance + ? WHERE player_uuid = ? AND balance <= ?";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, normalizeName(uniqueId, name));
+            statement.setLong(2, amount);
+            statement.setString(3, uniqueId.toString());
+            statement.setLong(4, Math.max(0L, maxBalance - amount));
+            return statement.executeUpdate() == 1;
+        }
+    }
+
+    private boolean updatePendingSellStatusInTransaction(
+            Connection connection,
+            String transactionId,
+            PendingSellStatus status,
+            String reason
+    ) throws SQLException {
+        String sql = "UPDATE " + quoted(pendingTransactionsTable)
+                + " SET status = ?, updated_at = ?, failure_reason = ? WHERE transaction_id = ?";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, status.name());
+            statement.setString(2, Instant.now().toString());
+            statement.setString(3, reason == null ? "" : reason);
+            statement.setString(4, transactionId);
+            return statement.executeUpdate() == 1;
         }
     }
 

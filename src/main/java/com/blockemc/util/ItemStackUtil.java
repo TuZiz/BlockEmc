@@ -115,16 +115,14 @@ public final class ItemStackUtil {
                 continue;
             }
             int removed = Math.min(content.getAmount(), remaining);
-            content.setAmount(content.getAmount() - removed);
+            ItemStack updated = content.clone();
+            updated.setAmount(content.getAmount() - removed);
             remaining -= removed;
-            if (content.getAmount() <= 0) {
-                contents[i] = null;
-            }
+            inventory.setItem(i, updated.getAmount() <= 0 ? null : updated);
             if (remaining <= 0) {
                 break;
             }
         }
-        inventory.setStorageContents(contents);
         return true;
     }
 

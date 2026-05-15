@@ -8,6 +8,7 @@ import com.blockemc.model.TradeResult;
 import com.blockemc.service.audit.PendingSellStatus;
 import com.blockemc.service.audit.PendingSellTransaction;
 import com.blockemc.service.audit.TransactionAuditRecord;
+import com.blockemc.service.storage.PendingCreditResult;
 import com.blockemc.util.AmountUtil;
 import com.blockemc.util.ItemStackUtil;
 import com.blockemc.util.SellableItemMatcher;
@@ -184,6 +185,9 @@ public final class ExchangeService {
         if (!value.mode().canSell()) {
             return CompletableFuture.completedFuture(TradeResult.failure("uemc-sell-disabled-buy-only"));
         }
+        if (settings.sellCustomItems()) {
+            return CompletableFuture.completedFuture(TradeResult.failure("uemc-custom-sell-pending-unsupported"));
+        }
 
         int safeAmount = Math.max(1, amount);
         long reward;
@@ -212,7 +216,8 @@ public final class ExchangeService {
                 PendingSellStatus.PENDING_REMOVAL,
                 Instant.now(),
                 Instant.now(),
-                ""
+                "",
+                plugin.getServer().getName()
         );
         return accountService.savePendingSell(transaction).thenCompose(ignored -> {
             CompletableFuture<TradeResult> result = new CompletableFuture<>();
@@ -242,6 +247,9 @@ public final class ExchangeService {
     }
 
     public BulkSellQuote previewBulkSell(Inventory inventory, Collection<Integer> inputSlots) {
+        if (settings.sellCustomItems()) {
+            return BulkSellQuote.failure("uemc-custom-sell-pending-unsupported");
+        }
         long totalReward = 0L;
         Map<Material, Integer> soldMaterials = new LinkedHashMap<>();
 
@@ -288,7 +296,8 @@ public final class ExchangeService {
                 PendingSellStatus.PENDING_REMOVAL,
                 Instant.now(),
                 Instant.now(),
-                ""
+                "",
+                plugin.getServer().getName()
         );
         return accountService.savePendingSell(transaction).thenCompose(ignored -> {
             CompletableFuture<TradeResult> result = new CompletableFuture<>();
@@ -383,6 +392,60 @@ public final class ExchangeService {
             PendingSellTransaction transaction,
             CompletableFuture<TradeResult> result
     ) {
+        accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.REMOVING_ITEMS, "item removal started")
+                .thenRun(() -> {
+                    try {
+                        scheduler.runForPlayer(player, () -> removeSellItemsOnPlayerThread(player, material, amount, unitPrice, transaction, result));
+                    } catch (RuntimeException exception) {
+                        failPending(transaction, "player scheduler failed");
+                        audit(player, "SELL", material, amount, unitPrice, transaction.reward(), false, "player scheduler failed");
+                        completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+                    }
+                })
+                .exceptionally(exception -> {
+                    plugin.getLogger().log(Level.WARNING, "Failed to mark sell as REMOVING_ITEMS before item removal: " + transaction.transactionId(), exception);
+                    failPending(transaction, "failed to persist item removal start");
+                    audit(player, "SELL", material, amount, unitPrice, transaction.reward(), false, "failed to persist item removal start");
+                    completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+                    return null;
+                });
+    }
+
+    private void finishBulkRemoval(
+            Player player,
+            Inventory inventory,
+            Collection<Integer> inputSlots,
+            BulkSellQuote originalQuote,
+            PendingSellTransaction transaction,
+            CompletableFuture<TradeResult> result
+    ) {
+        accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.REMOVING_ITEMS, "bulk item removal started")
+                .thenRun(() -> {
+                    try {
+                        scheduler.runForPlayer(player, () -> removeBulkItemsOnPlayerThread(player, inventory, inputSlots, originalQuote, transaction, result));
+                    } catch (RuntimeException exception) {
+                        failPending(transaction, "player scheduler failed");
+                        audit(player, "BULK_SELL", null, totalAmount(originalQuote), 0L, originalQuote.reward(), false, "player scheduler failed");
+                        completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+                    }
+                })
+                .exceptionally(exception -> {
+                    plugin.getLogger().log(Level.WARNING, "Failed to mark bulk sell as REMOVING_ITEMS before item removal: " + transaction.transactionId(), exception);
+                    failPending(transaction, "failed to persist item removal start");
+                    audit(player, "BULK_SELL", null, totalAmount(originalQuote), 0L, originalQuote.reward(), false, "failed to persist item removal start");
+                    completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+                    return null;
+                });
+    }
+
+    private void removeSellItemsOnPlayerThread(
+            Player player,
+            Material material,
+            int amount,
+            long unitPrice,
+            PendingSellTransaction transaction,
+            CompletableFuture<TradeResult> result
+    ) {
         try {
             boolean removed = ItemStackUtil.removeMatching(
                     player.getInventory(),
@@ -394,47 +457,24 @@ public final class ExchangeService {
             if (!removed) {
                 failPending(transaction, "item removal failed");
                 audit(player, "SELL", material, amount, unitPrice, transaction.reward(), false, "item removal failed");
-                releaseTradingLock(player.getUniqueId());
-                result.complete(TradeResult.failure("uemc-item-not-enough-sell"));
+                completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-item-not-enough-sell"));
                 return;
             }
-            accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.ITEMS_REMOVED, "")
-                    .thenCompose(ignored -> accountService.tryAddBalance(player.getUniqueId(), player.getName(), transaction.reward()))
-                    .thenCompose(added -> {
-                        if (!added) {
-                            return accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.FAILED, "balance add rejected")
-                                    .thenApply(ignored -> false);
-                        }
-                        return accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.SUCCESS, "")
-                                .thenApply(ignored -> true);
-                    })
-                    .thenAccept(added -> scheduler.runForPlayer(player, () -> {
-                        if (!added) {
-                            ItemStackUtil.giveOrDrop(player, new ItemStack(material, amount));
-                            audit(player, "SELL", material, amount, unitPrice, transaction.reward(), false, "balance add rejected");
-                            result.complete(TradeResult.failure("uemc-trade-storage-failed"));
-                        } else {
-                            accountService.recordSale(player.getUniqueId(), player.getName(), Map.of(material, amount), transaction.reward());
-                            audit(player, "SELL", material, amount, unitPrice, transaction.reward(), true, "");
-                            result.complete(TradeResult.success("uemc-sell-success", transaction.reward()));
-                        }
-                        releaseTradingLock(player.getUniqueId());
-                    }))
-                    .exceptionally(exception -> {
-                        plugin.getLogger().log(Level.SEVERE, "Pending sell failed after items were removed: " + transaction.transactionId(), exception);
-                        result.complete(TradeResult.failure("uemc-trade-storage-failed"));
-                        releaseTradingLock(player.getUniqueId());
-                        return null;
-                    });
+            completeSellCredit(player, transaction, () -> {
+                ItemStackUtil.giveOrDrop(player, new ItemStack(material, amount));
+                audit(player, "SELL", material, amount, unitPrice, transaction.reward(), false, "balance add rejected");
+            }, () -> {
+                accountService.recordSale(player.getUniqueId(), player.getName(), Map.of(material, amount), transaction.reward());
+                audit(player, "SELL", material, amount, unitPrice, transaction.reward(), true, "");
+            }, result, "uemc-sell-success");
         } catch (RuntimeException exception) {
-            failPending(transaction, exception.getMessage());
+            markManualReview(transaction, "runtime exception after removal started: " + exception.getMessage());
             audit(player, "SELL", material, amount, unitPrice, transaction.reward(), false, exception.getMessage());
-            releaseTradingLock(player.getUniqueId());
-            result.complete(TradeResult.failure("uemc-trade-storage-failed"));
+            completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
         }
     }
 
-    private void finishBulkRemoval(
+    private void removeBulkItemsOnPlayerThread(
             Player player,
             Inventory inventory,
             Collection<Integer> inputSlots,
@@ -449,8 +489,7 @@ public final class ExchangeService {
                     || !currentQuote.soldMaterials().equals(originalQuote.soldMaterials())) {
                 failPending(transaction, "input changed before removal");
                 audit(player, "BULK_SELL", null, totalAmount(originalQuote), 0L, originalQuote.reward(), false, "input changed before removal");
-                releaseTradingLock(player.getUniqueId());
-                result.complete(TradeResult.failure("uemc-bulk-sell-input-changed"));
+                completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-bulk-sell-input-changed"));
                 return;
             }
             for (int slot : inputSlots) {
@@ -459,39 +498,96 @@ public final class ExchangeService {
                     inventory.setItem(slot, null);
                 }
             }
-            accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.ITEMS_REMOVED, "")
-                    .thenCompose(ignored -> accountService.tryAddBalance(player.getUniqueId(), player.getName(), originalQuote.reward()))
-                    .thenCompose(added -> {
-                        if (!added) {
-                            return accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.FAILED, "balance add rejected")
-                                    .thenApply(ignored -> false);
-                        }
-                        return accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.SUCCESS, "")
-                                .thenApply(ignored -> true);
-                    })
-                    .thenAccept(added -> scheduler.runForPlayer(player, () -> {
-                        if (!added) {
-                            returnBulkMaterials(player, originalQuote);
-                            audit(player, "BULK_SELL", null, totalAmount(originalQuote), 0L, originalQuote.reward(), false, "balance add rejected");
-                            result.complete(TradeResult.failure("uemc-trade-storage-failed"));
-                        } else {
-                            accountService.recordSale(player.getUniqueId(), player.getName(), originalQuote.soldMaterials(), originalQuote.reward());
-                            audit(player, "BULK_SELL", null, totalAmount(originalQuote), 0L, originalQuote.reward(), true, "");
-                            result.complete(TradeResult.success("uemc-batch-sell-success", originalQuote.reward()));
-                        }
-                        releaseTradingLock(player.getUniqueId());
-                    }))
-                    .exceptionally(exception -> {
-                        plugin.getLogger().log(Level.SEVERE, "Pending bulk sell failed after items were removed: " + transaction.transactionId(), exception);
-                        result.complete(TradeResult.failure("uemc-trade-storage-failed"));
-                        releaseTradingLock(player.getUniqueId());
-                        return null;
-                    });
+            completeSellCredit(player, transaction, () -> {
+                returnBulkMaterials(player, originalQuote);
+                audit(player, "BULK_SELL", null, totalAmount(originalQuote), 0L, originalQuote.reward(), false, "balance add rejected");
+            }, () -> {
+                accountService.recordSale(player.getUniqueId(), player.getName(), originalQuote.soldMaterials(), originalQuote.reward());
+                audit(player, "BULK_SELL", null, totalAmount(originalQuote), 0L, originalQuote.reward(), true, "");
+            }, result, "uemc-batch-sell-success");
         } catch (RuntimeException exception) {
-            failPending(transaction, exception.getMessage());
+            markManualReview(transaction, "runtime exception after bulk removal started: " + exception.getMessage());
             audit(player, "BULK_SELL", null, totalAmount(originalQuote), 0L, originalQuote.reward(), false, exception.getMessage());
-            releaseTradingLock(player.getUniqueId());
-            result.complete(TradeResult.failure("uemc-trade-storage-failed"));
+            completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+        }
+    }
+
+    private void completeSellCredit(
+            Player player,
+            PendingSellTransaction transaction,
+            Runnable onRejected,
+            Runnable onSuccess,
+            CompletableFuture<TradeResult> result,
+            String successMessageKey
+    ) {
+        accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.ITEMS_REMOVED, "")
+                .thenCompose(ignored -> accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.CREDITING, "credit started"))
+                .thenCompose(ignored -> accountService.completePendingSellCredit(transaction.withStatus(PendingSellStatus.CREDITING, "credit started")))
+                .thenAccept(creditResult -> {
+                    try {
+                        scheduler.runForPlayer(player, () -> finishCreditResultOnPlayerThread(
+                                player,
+                                transaction,
+                                creditResult,
+                                onRejected,
+                                onSuccess,
+                                result,
+                                successMessageKey
+                        ));
+                    } catch (RuntimeException exception) {
+                        if (creditResult == PendingCreditResult.SUCCESS) {
+                            plugin.getLogger().log(
+                                    Level.SEVERE,
+                                    "Pending sell credit completed but player-thread finalization failed: " + transaction.transactionId(),
+                                    exception
+                            );
+                            completeWithUnlock(player.getUniqueId(), result, TradeResult.success(successMessageKey, transaction.reward()));
+                            return;
+                        }
+                        markManualReview(transaction, "player scheduler failed after credit stage: " + exception.getMessage());
+                        completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+                    }
+                })
+                .exceptionally(exception -> {
+                    plugin.getLogger().log(Level.SEVERE, "Pending sell failed after items were removed: " + transaction.transactionId(), exception);
+                    markManualReview(transaction, "credit stage exception: " + exception.getMessage());
+                    completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+                    return null;
+                });
+    }
+
+    private void finishCreditResultOnPlayerThread(
+            Player player,
+            PendingSellTransaction transaction,
+            PendingCreditResult creditResult,
+            Runnable onRejected,
+            Runnable onSuccess,
+            CompletableFuture<TradeResult> result,
+            String successMessageKey
+    ) {
+        try {
+            if (creditResult == PendingCreditResult.SUCCESS) {
+                onSuccess.run();
+                completeWithUnlock(player.getUniqueId(), result, TradeResult.success(successMessageKey, transaction.reward()));
+                return;
+            }
+            if (creditResult == PendingCreditResult.REJECTED) {
+                onRejected.run();
+                accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.FAILED, "balance add rejected")
+                        .thenRun(() -> completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed")))
+                        .exceptionally(exception -> {
+                            plugin.getLogger().log(Level.SEVERE, "Failed to mark rejected pending sell as failed: " + transaction.transactionId(), exception);
+                            markManualReview(transaction, "failed to persist rejected credit result");
+                            completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+                            return null;
+                        });
+                return;
+            }
+                markManualReview(transaction, "balance credit uncertain");
+            completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
+        } catch (RuntimeException exception) {
+            markManualReview(transaction, "player-thread credit completion failed: " + exception.getMessage());
+            completeWithUnlock(player.getUniqueId(), result, TradeResult.failure("uemc-trade-storage-failed"));
         }
     }
 
@@ -501,6 +597,26 @@ public final class ExchangeService {
                     plugin.getLogger().log(Level.SEVERE, "Failed to mark pending sell as failed: " + transaction.transactionId(), exception);
                     return null;
                 });
+    }
+
+    private void markManualReview(PendingSellTransaction transaction, String reason) {
+        accountService.updatePendingSellStatus(transaction.transactionId(), PendingSellStatus.MANUAL_REVIEW, reason)
+                .exceptionally(exception -> {
+                    plugin.getLogger().log(Level.SEVERE, "Failed to mark pending sell for manual review: " + transaction.transactionId(), exception);
+                    return null;
+                });
+        plugin.getLogger().severe(
+                "Pending sell requires manual review: transactionId=" + transaction.transactionId()
+                        + ", playerUuid=" + transaction.playerUuid()
+                        + ", materials=" + transaction.materials()
+                        + ", reward=" + transaction.reward()
+                        + ", reason=" + reason
+        );
+    }
+
+    private void completeWithUnlock(UUID playerUuid, CompletableFuture<TradeResult> result, TradeResult tradeResult) {
+        releaseTradingLock(playerUuid);
+        result.complete(tradeResult);
     }
 
     private void returnBulkMaterials(Player player, BulkSellQuote quote) {

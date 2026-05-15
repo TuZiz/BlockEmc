@@ -47,5 +47,12 @@ public interface SharedAccountStorage extends AccountStorage {
         return List.of();
     }
 
+    default PendingCreditResult completePendingSellCredit(
+            PendingSellTransaction transaction,
+            long maxBalance
+    ) throws AccountStorageException {
+        return PendingCreditResult.MANUAL_REVIEW_REQUIRED;
+    }
+
     void importFromYamlIfNeeded() throws AccountStorageException;
 }

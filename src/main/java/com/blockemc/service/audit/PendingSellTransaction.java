@@ -14,12 +14,41 @@ public record PendingSellTransaction(
         PendingSellStatus status,
         Instant createdAt,
         Instant updatedAt,
-        String failureReason
+        String failureReason,
+        String serverName
 ) {
 
     public PendingSellTransaction {
         materials = materials == null ? Map.of() : Map.copyOf(materials);
         failureReason = failureReason == null ? "" : failureReason;
+        serverName = serverName == null ? "" : serverName;
+    }
+
+    public PendingSellTransaction(
+            String transactionId,
+            UUID playerUuid,
+            String playerName,
+            String operationType,
+            Map<String, Integer> materials,
+            long reward,
+            PendingSellStatus status,
+            Instant createdAt,
+            Instant updatedAt,
+            String failureReason
+    ) {
+        this(
+                transactionId,
+                playerUuid,
+                playerName,
+                operationType,
+                materials,
+                reward,
+                status,
+                createdAt,
+                updatedAt,
+                failureReason,
+                ""
+        );
     }
 
     public PendingSellTransaction withStatus(PendingSellStatus nextStatus, String reason) {
@@ -33,7 +62,8 @@ public record PendingSellTransaction(
                 nextStatus,
                 createdAt,
                 Instant.now(),
-                reason
+                reason,
+                serverName
         );
     }
 }
