@@ -1,0 +1,89 @@
+Shop:
+  Id: "nether"
+  Name: "&c&l下界风格"
+  Icon: "NETHER_BRICKS"
+  Lore:
+    - "&7下界砖、黑石、玄武岩、石英与菌岩装饰"
+  Order: 50
+  Materials:
+    - "BASALT"
+    - "BLACKSTONE"
+    - "BLACKSTONE_SLAB"
+    - "BLACKSTONE_STAIRS"
+    - "BLACKSTONE_WALL"
+    - "CHISELED_NETHER_BRICKS"
+    - "CHISELED_QUARTZ_BLOCK"
+    - "CRACKED_NETHER_BRICKS"
+    - "CRIMSON_NYLIUM"
+    - "GLOWSTONE"
+    - "NETHERRACK"
+    - "NETHER_BRICKS"
+    - "NETHER_BRICK_SLAB"
+    - "NETHER_BRICK_STAIRS"
+    - "NETHER_BRICK_WALL"
+    - "NETHER_WART_BLOCK"
+    - "POLISHED_BASALT"
+    - "QUARTZ_BLOCK"
+    - "QUARTZ_BRICKS"
+    - "QUARTZ_PILLAR"
+    - "QUARTZ_SLAB"
+    - "QUARTZ_STAIRS"
+    - "RED_NETHER_BRICKS"
+    - "RED_NETHER_BRICK_SLAB"
+    - "RED_NETHER_BRICK_STAIRS"
+    - "RED_NETHER_BRICK_WALL"
+    - "SHROOMLIGHT"
+    - "SMOOTH_BASALT"
+    - "SMOOTH_QUARTZ"
+    - "SMOOTH_QUARTZ_SLAB"
+    - "SMOOTH_QUARTZ_STAIRS"
+    - "SOUL_SAND"
+    - "SOUL_SOIL"
+    - "WARPED_NYLIUM"
+    - "WARPED_WART_BLOCK"
+
+Title: "&0[ &c下界风格 &0] &8建筑商店"
+
+GuiPlain:
+  - "####S####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L###B###N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"
+  "S":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l当前余额"
+    Lore:
+      - "&7账户: &f%emc% EMC"

@@ -1,0 +1,38 @@
+Title: "&0[ &a批量售卖 &0] &8建筑回收"
+
+GuiPlain:
+  - "####T####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "##S#B####"
+
+GuiKey:
+  "@":
+    IconFunction: "input"
+    Material: "GRAY_STAINED_GLASS_PANE"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "S":
+    IconFunction: "sell"
+    Material: "EMERALD"
+    Name: "&a&l一键售卖"
+    Lore:
+      - "&7仅可放入已配置 EMC 且允许回收的方块"
+      - "&7若出现不可回收物品，将直接阻止本次售卖"
+      - "&7高价值售卖会弹出确认界面"
+      - ""
+      - "&e点击执行"
+  "T":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l当前状态"
+    Lore:
+      - "&7账户余额: &f%emc% EMC"
+      - "&7今日售卖收益: &a%today_emc% EMC"
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"

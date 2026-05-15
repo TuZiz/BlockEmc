@@ -1,0 +1,722 @@
+package com.blockemc.service;
+
+import com.blockemc.model.StorageSettings;
+import com.blockemc.service.storage.AccountSnapshot;
+import com.blockemc.service.storage.AccountStorage;
+import com.blockemc.service.storage.AccountStorageException;
+import com.blockemc.service.storage.MySqlAccountStorage;
+import com.blockemc.service.storage.PlayerAccountState;
+import com.blockemc.service.storage.SharedAccountGlobalState;
+import com.blockemc.service.storage.SharedAccountStorage;
+import com.blockemc.service.storage.YamlAccountStorage;
+import java.time.LocalDate;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.logging.Level;
+import org.bukkit.Bukkit;
+import org.bukkit.Material;
+import org.bukkit.entity.Player;
+import org.bukkit.plugin.java.JavaPlugin;
+
+public final class AccountService {
+
+    public record LeaderboardEntry(String name, long balance) {
+    }
+
+    public record DailyLeaderboardEntry(String name, long soldEmc, Material topMaterial, int topMaterialAmount) {
+    }
+
+    public record DailySaleSummary(long soldEmc, Material topMaterial, int topMaterialAmount, int favoriteCount) {
+    }
+
+    public record HotMaterialEntry(Material material, int purchases) {
+    }
+
+    private interface SharedStorageAction {
+
+        void execute(SharedAccountStorage storage) throws AccountStorageException;
+    }
+
+    private static final class DailySaleData {
+        private String date;
+        private long soldEmc;
+        private final Map<String, Integer> soldAmounts = new HashMap<>();
+
+        private DailySaleData(String date) {
+            this.date = date;
+        }
+
+        private void reset(String date) {
+            this.date = date;
+            this.soldEmc = 0L;
+            this.soldAmounts.clear();
+        }
+    }
+
+    private final JavaPlugin plugin;
+    private final Map<UUID, Long> balances = new ConcurrentHashMap<>();
+    private final Map<UUID, String> names = new ConcurrentHashMap<>();
+    private final Map<UUID, Set<Material>> favorites = new ConcurrentHashMap<>();
+    private final Map<UUID, DailySaleData> dailySales = new ConcurrentHashMap<>();
+    private final Map<String, Integer> purchaseHeat = new ConcurrentHashMap<>();
+    private final Map<UUID, Long> globalBalances = new ConcurrentHashMap<>();
+    private final Map<UUID, String> globalNames = new ConcurrentHashMap<>();
+    private final Map<UUID, AccountSnapshot.DailySaleSnapshot> globalDailySales = new ConcurrentHashMap<>();
+    private final Map<String, Integer> globalPurchaseHeat = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "BlockEmc-Account-IO");
+        thread.setDaemon(true);
+        return thread;
+    });
+    private final AtomicBoolean dirty = new AtomicBoolean(false);
+    private volatile StorageSettings storageSettings;
+    private volatile AccountStorage storage;
+    private volatile ScheduledFuture<?> backgroundTask;
+    private volatile boolean backgroundTaskStarted;
+
+    public AccountService(JavaPlugin plugin, StorageSettings storageSettings) {
+        this.plugin = plugin;
+        this.storageSettings = storageSettings;
+        this.storage = createStorage(storageSettings);
+    }
+
+    public synchronized void applyStorageSettings(StorageSettings newSettings) {
+        if (newSettings == null || newSettings.equals(this.storageSettings)) {
+            return;
+        }
+
+        cancelBackgroundTask();
+        awaitExecutorIdle();
+
+        AccountStorage previous = this.storage;
+        StorageSettings previousSettings = this.storageSettings;
+
+        if (!(previous instanceof SharedAccountStorage)) {
+            saveSync();
+        }
+
+        AccountStorage candidate = createStorage(newSettings);
+        try {
+            if (candidate instanceof SharedAccountStorage sharedCandidate) {
+                sharedCandidate.importFromYamlIfNeeded();
+            } else if (previous instanceof SharedAccountStorage) {
+                candidate.save(previous.load());
+            } else {
+                candidate.save(snapshotLocked());
+            }
+        } catch (AccountStorageException | RuntimeException exception) {
+            closeQuietly(candidate);
+            this.storage = previous;
+            this.storageSettings = previousSettings;
+            if (backgroundTaskStarted) {
+                scheduleBackgroundTask();
+            }
+            throw new IllegalStateException("Failed to switch account storage to " + newSettings.describe(), exception);
+        }
+
+        this.storage = candidate;
+        this.storageSettings = newSettings;
+        this.dirty.set(false);
+        closeQuietly(previous);
+
+        if (backgroundTaskStarted) {
+            scheduleBackgroundTask();
+        }
+    }
+
+    public String getStorageDescription() {
+        return storageSettings.describe();
+    }
+
+    public void reload() {
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage != null) {
+            reloadShared(sharedStorage);
+            return;
+        }
+        reloadLocal();
+    }
+
+    public void startAutoSave() {
+        backgroundTaskStarted = true;
+        scheduleBackgroundTask();
+    }
+
+    public void shutdown() {
+        cancelBackgroundTask();
+        if (sharedStorage() == null) {
+            saveSync();
+        } else {
+            awaitExecutorIdle();
+        }
+        executor.shutdown();
+        try {
+            if (!executor.awaitTermination(15, TimeUnit.SECONDS)) {
+                plugin.getLogger().warning("Timed out waiting for account storage executor to stop cleanly.");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
+        closeQuietly(storage);
+    }
+
+    public synchronized void notePlayer(Player player) {
+        UUID uniqueId = player.getUniqueId();
+        String name = player.getName();
+        names.put(uniqueId, name);
+        globalNames.put(uniqueId, name);
+
+        if (sharedStorage() != null) {
+            balances.putIfAbsent(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
+            favorites.computeIfAbsent(uniqueId, ignored -> EnumSet.noneOf(Material.class));
+            dailySales.computeIfAbsent(uniqueId, ignored -> new DailySaleData(todayKey()));
+            return;
+        }
+
+        balances.putIfAbsent(uniqueId, 0L);
+        favorites.computeIfAbsent(uniqueId, ignored -> EnumSet.noneOf(Material.class));
+        dailySales.computeIfAbsent(uniqueId, ignored -> new DailySaleData(todayKey()));
+        copyLocalToGlobalLocked();
+        dirty.set(true);
+    }
+
+    public void preloadPlayer(UUID uniqueId, String name) {
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage == null || uniqueId == null) {
+            return;
+        }
+        try {
+            PlayerAccountState state = sharedStorage.loadPlayer(uniqueId, name);
+            synchronized (this) {
+                applySharedPlayerStateLocked(uniqueId, state, name);
+            }
+        } catch (AccountStorageException exception) {
+            plugin.getLogger().log(Level.SEVERE, "Failed to preload shared account data for " + uniqueId, exception);
+            synchronized (this) {
+                names.put(uniqueId, name);
+                globalNames.put(uniqueId, name);
+                balances.putIfAbsent(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
+                favorites.computeIfAbsent(uniqueId, ignored -> EnumSet.noneOf(Material.class));
+                dailySales.computeIfAbsent(uniqueId, ignored -> new DailySaleData(todayKey()));
+            }
+        }
+    }
+
+    public synchronized void handleQuit(UUID uniqueId) {
+        if (uniqueId == null || sharedStorage() == null) {
+            return;
+        }
+        balances.remove(uniqueId);
+        names.remove(uniqueId);
+        favorites.remove(uniqueId);
+        dailySales.remove(uniqueId);
+    }
+
+    public synchronized long getBalance(UUID uniqueId) {
+        return balances.getOrDefault(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
+    }
+
+    public synchronized long setBalance(UUID uniqueId, String name, long amount) {
+        long normalized = Math.max(0L, amount);
+        names.put(uniqueId, name);
+        balances.put(uniqueId, normalized);
+        globalNames.put(uniqueId, name);
+        globalBalances.put(uniqueId, normalized);
+        submitStorageUpdate("set shared EMC balance", storage -> storage.setBalance(uniqueId, name, normalized));
+        return normalized;
+    }
+
+    public synchronized long addBalance(UUID uniqueId, String name, long amount) {
+        long delta = Math.max(0L, amount);
+        long current = balances.getOrDefault(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
+        long next = current + delta;
+        names.put(uniqueId, name);
+        balances.put(uniqueId, next);
+        globalNames.put(uniqueId, name);
+        globalBalances.put(uniqueId, next);
+        submitStorageUpdate("increment shared EMC balance", storage -> storage.addBalance(uniqueId, name, delta));
+        return next;
+    }
+
+    public synchronized long takeBalance(UUID uniqueId, String name, long amount) {
+        long delta = Math.max(0L, amount);
+        long current = balances.getOrDefault(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
+        long next = Math.max(0L, current - delta);
+        names.put(uniqueId, name);
+        balances.put(uniqueId, next);
+        globalNames.put(uniqueId, name);
+        globalBalances.put(uniqueId, next);
+        submitStorageUpdate("decrement shared EMC balance", storage -> storage.takeBalance(uniqueId, name, delta));
+        return next;
+    }
+
+    public synchronized boolean toggleFavorite(UUID uniqueId, Material material) {
+        Set<Material> set = favorites.computeIfAbsent(uniqueId, ignored -> EnumSet.noneOf(Material.class));
+        boolean added;
+        if (set.contains(material)) {
+            set.remove(material);
+            added = false;
+        } else {
+            set.add(material);
+            added = true;
+        }
+        String name = names.getOrDefault(uniqueId, globalNames.getOrDefault(uniqueId, uniqueId.toString()));
+        submitStorageUpdate("update shared favorites", storage -> storage.setFavorite(uniqueId, name, material, added));
+        return added;
+    }
+
+    public synchronized boolean isFavorite(UUID uniqueId, Material material) {
+        return favorites.getOrDefault(uniqueId, Set.of()).contains(material);
+    }
+
+    public synchronized List<Material> getFavorites(UUID uniqueId) {
+        return favorites.getOrDefault(uniqueId, Set.of()).stream()
+                .sorted(Comparator.comparing(Material::name))
+                .toList();
+    }
+
+    public synchronized int getFavoriteCount(UUID uniqueId) {
+        return favorites.getOrDefault(uniqueId, Set.of()).size();
+    }
+
+    public synchronized void recordSale(UUID uniqueId, String name, Map<Material, Integer> soldMaterials, long soldEmc) {
+        if (soldMaterials.isEmpty() || soldEmc <= 0L) {
+            return;
+        }
+        names.put(uniqueId, name);
+        globalNames.put(uniqueId, name);
+        DailySaleData data = getOrCreateTodayData(uniqueId);
+        data.soldEmc += soldEmc;
+        for (Map.Entry<Material, Integer> entry : soldMaterials.entrySet()) {
+            if (entry.getValue() <= 0) {
+                continue;
+            }
+            data.soldAmounts.merge(entry.getKey().name(), entry.getValue(), Integer::sum);
+        }
+        globalDailySales.put(uniqueId, toSnapshot(data));
+        submitStorageUpdate("record shared sale statistics", storage -> storage.recordSale(uniqueId, name, soldMaterials, soldEmc, todayKey()));
+    }
+
+    public synchronized void recordPurchase(UUID uniqueId, String name, Material material, int amount) {
+        if (material == null || amount <= 0) {
+            return;
+        }
+        names.put(uniqueId, name);
+        globalNames.put(uniqueId, name);
+        if (sharedStorage() == null) {
+            purchaseHeat.merge(material.name(), amount, Integer::sum);
+            copyLocalToGlobalLocked();
+        } else {
+            globalPurchaseHeat.merge(material.name(), amount, Integer::sum);
+        }
+        submitStorageUpdate("record shared purchase heat", storage -> storage.recordPurchase(uniqueId, name, material, amount));
+    }
+
+    public synchronized DailySaleSummary getTodaySummary(UUID uniqueId) {
+        DailySaleData data = dailySales.get(uniqueId);
+        if (data == null) {
+            AccountSnapshot.DailySaleSnapshot snapshot = globalDailySales.get(uniqueId);
+            data = snapshot == null ? new DailySaleData(todayKey()) : toMutable(snapshot);
+        }
+        data = normalizeDailyData(data, todayKey());
+        Map.Entry<String, Integer> topEntry = data.soldAmounts.entrySet().stream()
+                .max(Map.Entry.<String, Integer>comparingByValue().thenComparing(Map.Entry::getKey))
+                .orElse(null);
+        Material topMaterial = topEntry == null ? null : Material.matchMaterial(topEntry.getKey());
+        int topAmount = topEntry == null ? 0 : topEntry.getValue();
+        return new DailySaleSummary(data.soldEmc, topMaterial, topAmount, getFavoriteCount(uniqueId));
+    }
+
+    public synchronized List<LeaderboardEntry> getLeaderboardPage(int page, int pageSize) {
+        int safePage = Math.max(1, page);
+        int safeSize = Math.max(1, pageSize);
+        Map<UUID, Long> sourceBalances = leaderboardBalances();
+        Map<UUID, String> sourceNames = leaderboardNames();
+        return sourceBalances.entrySet().stream()
+                .filter(entry -> entry.getValue() > 0L)
+                .sorted(Map.Entry.<UUID, Long>comparingByValue(Comparator.reverseOrder()))
+                .skip((long) (safePage - 1) * safeSize)
+                .limit(safeSize)
+                .map(entry -> new LeaderboardEntry(sourceNames.getOrDefault(entry.getKey(), entry.getKey().toString()), entry.getValue()))
+                .toList();
+    }
+
+    public synchronized int getLeaderboardTotalPages(int pageSize) {
+        Map<UUID, Long> sourceBalances = leaderboardBalances();
+        long size = sourceBalances.values().stream().filter(value -> value > 0L).count();
+        int safeSize = Math.max(1, pageSize);
+        return Math.max(1, (int) Math.ceil(size / (double) safeSize));
+    }
+
+    public synchronized List<DailyLeaderboardEntry> getDailyLeaderboardPage(int page, int pageSize) {
+        int safePage = Math.max(1, page);
+        int safeSize = Math.max(1, pageSize);
+        Map<UUID, AccountSnapshot.DailySaleSnapshot> sourceDailySales = leaderboardDailySales();
+        Map<UUID, String> sourceNames = leaderboardNames();
+        String today = todayKey();
+        return sourceDailySales.entrySet().stream()
+                .map(entry -> Map.entry(entry.getKey(), normalizeDailySnapshot(entry.getValue(), today)))
+                .filter(entry -> entry.getValue().soldEmc() > 0L)
+                .sorted((left, right) -> Long.compare(right.getValue().soldEmc(), left.getValue().soldEmc()))
+                .skip((long) (safePage - 1) * safeSize)
+                .limit(safeSize)
+                .map(entry -> {
+                    Map.Entry<String, Integer> topEntry = entry.getValue().soldAmounts().entrySet().stream()
+                            .max(Map.Entry.<String, Integer>comparingByValue().thenComparing(Map.Entry::getKey))
+                            .orElse(null);
+                    Material topMaterial = topEntry == null ? null : Material.matchMaterial(topEntry.getKey());
+                    int topAmount = topEntry == null ? 0 : topEntry.getValue();
+                    return new DailyLeaderboardEntry(
+                            sourceNames.getOrDefault(entry.getKey(), entry.getKey().toString()),
+                            entry.getValue().soldEmc(),
+                            topMaterial,
+                            topAmount
+                    );
+                })
+                .toList();
+    }
+
+    public synchronized int getDailyLeaderboardTotalPages(int pageSize) {
+        String today = todayKey();
+        Map<UUID, AccountSnapshot.DailySaleSnapshot> sourceDailySales = leaderboardDailySales();
+        long size = sourceDailySales.values().stream()
+                .map(snapshot -> normalizeDailySnapshot(snapshot, today))
+                .filter(snapshot -> snapshot.soldEmc() > 0L)
+                .count();
+        int safeSize = Math.max(1, pageSize);
+        return Math.max(1, (int) Math.ceil(size / (double) safeSize));
+    }
+
+    public synchronized int getPurchaseHeat(Material material) {
+        if (material == null) {
+            return 0;
+        }
+        if (sharedStorage() != null) {
+            return globalPurchaseHeat.getOrDefault(material.name(), 0);
+        }
+        return purchaseHeat.getOrDefault(material.name(), 0);
+    }
+
+    public synchronized List<HotMaterialEntry> getHotMaterials(int limit) {
+        int safeLimit = Math.max(1, limit);
+        Map<String, Integer> source = sharedStorage() != null ? globalPurchaseHeat : purchaseHeat;
+        return source.entrySet().stream()
+                .filter(entry -> entry.getValue() > 0)
+                .sorted(Map.Entry.<String, Integer>comparingByValue(Comparator.reverseOrder())
+                        .thenComparing(Map.Entry::getKey))
+                .limit(safeLimit)
+                .map(entry -> {
+                    Material material = Material.matchMaterial(entry.getKey());
+                    return material == null ? null : new HotMaterialEntry(material, entry.getValue());
+                })
+                .filter(java.util.Objects::nonNull)
+                .toList();
+    }
+
+    public void saveSync() {
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage != null) {
+            awaitExecutorIdle();
+            return;
+        }
+        AccountSnapshot snapshot = snapshot();
+        dirty.set(false);
+        try {
+            storage.save(snapshot);
+        } catch (AccountStorageException exception) {
+            dirty.set(true);
+            plugin.getLogger().log(Level.SEVERE, "Failed to synchronously save account data", exception);
+        }
+    }
+
+    private synchronized AccountSnapshot snapshotLocked() {
+        String today = todayKey();
+        Map<UUID, Set<Material>> favoriteSnapshot = new HashMap<>();
+        favorites.forEach((uuid, materials) -> favoriteSnapshot.put(uuid, Set.copyOf(materials)));
+
+        Map<UUID, AccountSnapshot.DailySaleSnapshot> dailySnapshot = new HashMap<>();
+        dailySales.forEach((uuid, data) -> {
+            DailySaleData normalized = normalizeDailyData(data, today);
+            dailySnapshot.put(uuid, new AccountSnapshot.DailySaleSnapshot(normalized.date, normalized.soldEmc, normalized.soldAmounts));
+        });
+
+        return new AccountSnapshot(
+                new HashMap<>(balances),
+                new HashMap<>(names),
+                favoriteSnapshot,
+                dailySnapshot,
+                new HashMap<>(purchaseHeat)
+        );
+    }
+
+    private AccountSnapshot snapshot() {
+        synchronized (this) {
+            return snapshotLocked();
+        }
+    }
+
+    private void reloadLocal() {
+        AccountSnapshot snapshot = loadSnapshot();
+        synchronized (this) {
+            populateLocalStateLocked(snapshot);
+            copyLocalToGlobalLocked();
+            dirty.set(false);
+        }
+    }
+
+    private void reloadShared(SharedAccountStorage sharedStorage) {
+        try {
+            sharedStorage.importFromYamlIfNeeded();
+            SharedAccountGlobalState state = sharedStorage.loadGlobalState();
+            synchronized (this) {
+                replaceGlobalStateLocked(state);
+                retainSharedActiveCachesLocked();
+                dirty.set(false);
+            }
+            Bukkit.getOnlinePlayers().forEach(player -> executor.execute(() -> preloadPlayer(player.getUniqueId(), player.getName())));
+        } catch (AccountStorageException exception) {
+            throw new IllegalStateException("Failed to load account data from " + storageSettings.describe(), exception);
+        }
+    }
+
+    private void populateLocalStateLocked(AccountSnapshot snapshot) {
+        balances.clear();
+        names.clear();
+        favorites.clear();
+        dailySales.clear();
+        purchaseHeat.clear();
+
+        balances.putAll(snapshot.balances());
+        names.putAll(snapshot.names());
+        snapshot.favorites().forEach((uuid, materials) -> {
+            Set<Material> copied = EnumSet.noneOf(Material.class);
+            copied.addAll(materials);
+            favorites.put(uuid, copied);
+        });
+        snapshot.dailySales().forEach((uuid, sale) -> dailySales.put(uuid, toMutable(sale)));
+        purchaseHeat.putAll(snapshot.purchaseHeat());
+    }
+
+    private void replaceGlobalStateLocked(SharedAccountGlobalState state) {
+        globalBalances.clear();
+        globalBalances.putAll(state.balances());
+        globalNames.clear();
+        globalNames.putAll(state.names());
+        globalDailySales.clear();
+        globalDailySales.putAll(state.dailySales());
+        globalPurchaseHeat.clear();
+        globalPurchaseHeat.putAll(state.purchaseHeat());
+    }
+
+    private void retainSharedActiveCachesLocked() {
+        Set<UUID> onlinePlayers = Bukkit.getOnlinePlayers().stream()
+                .map(Player::getUniqueId)
+                .collect(java.util.stream.Collectors.toSet());
+        balances.keySet().retainAll(onlinePlayers);
+        names.keySet().retainAll(onlinePlayers);
+        favorites.keySet().retainAll(onlinePlayers);
+        dailySales.keySet().retainAll(onlinePlayers);
+    }
+
+    private void applySharedPlayerStateLocked(UUID uniqueId, PlayerAccountState state, String fallbackName) {
+        String resolvedName = state.name().isBlank() ? fallbackName : state.name();
+        names.put(uniqueId, resolvedName);
+        balances.put(uniqueId, state.balance());
+        globalNames.put(uniqueId, resolvedName);
+        globalBalances.put(uniqueId, state.balance());
+
+        Set<Material> favoriteCopy = EnumSet.noneOf(Material.class);
+        favoriteCopy.addAll(state.favorites());
+        favorites.put(uniqueId, favoriteCopy);
+
+        DailySaleData saleData = toMutable(state.dailySale());
+        dailySales.put(uniqueId, saleData);
+        globalDailySales.put(uniqueId, toSnapshot(saleData));
+    }
+
+    private synchronized void copyLocalToGlobalLocked() {
+        globalBalances.clear();
+        globalBalances.putAll(balances);
+        globalNames.clear();
+        globalNames.putAll(names);
+        globalDailySales.clear();
+        dailySales.forEach((uuid, data) -> globalDailySales.put(uuid, toSnapshot(data)));
+        globalPurchaseHeat.clear();
+        globalPurchaseHeat.putAll(purchaseHeat);
+    }
+
+    private void scheduleBackgroundTask() {
+        cancelBackgroundTask();
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage == null) {
+            backgroundTask = executor.scheduleAtFixedRate(this::saveIfDirty, 5, 5, TimeUnit.MINUTES);
+            return;
+        }
+        long refreshSeconds = Math.max(5, storageSettings.mysql().refreshSeconds());
+        backgroundTask = executor.scheduleAtFixedRate(this::refreshSharedGlobalCache, refreshSeconds, refreshSeconds, TimeUnit.SECONDS);
+    }
+
+    private void cancelBackgroundTask() {
+        ScheduledFuture<?> task = backgroundTask;
+        if (task != null) {
+            task.cancel(false);
+            backgroundTask = null;
+        }
+    }
+
+    private void refreshSharedGlobalCache() {
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage == null) {
+            return;
+        }
+        try {
+            SharedAccountGlobalState state = sharedStorage.loadGlobalState();
+            synchronized (this) {
+                replaceGlobalStateLocked(state);
+            }
+        } catch (AccountStorageException exception) {
+            plugin.getLogger().log(Level.SEVERE, "Failed to refresh shared account cache", exception);
+        }
+    }
+
+    private void saveIfDirty() {
+        if (sharedStorage() != null) {
+            return;
+        }
+        if (!dirty.compareAndSet(true, false)) {
+            return;
+        }
+        AccountSnapshot snapshot = snapshot();
+        try {
+            storage.save(snapshot);
+        } catch (AccountStorageException exception) {
+            dirty.set(true);
+            plugin.getLogger().log(Level.SEVERE, "Failed to asynchronously save account data", exception);
+        }
+    }
+
+    private void submitStorageUpdate(String action, SharedStorageAction sharedAction) {
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage == null) {
+            dirty.set(true);
+            return;
+        }
+        executor.execute(() -> {
+            try {
+                sharedAction.execute(sharedStorage);
+            } catch (AccountStorageException exception) {
+                plugin.getLogger().log(Level.SEVERE, "Failed to " + action, exception);
+            }
+        });
+    }
+
+    private AccountSnapshot loadSnapshot() {
+        try {
+            return storage.load();
+        } catch (AccountStorageException exception) {
+            throw new IllegalStateException("Failed to load account data from " + storageSettings.describe(), exception);
+        }
+    }
+
+    private AccountStorage createStorage(StorageSettings settings) {
+        try {
+            return switch (settings.type()) {
+                case YAML -> new YamlAccountStorage(plugin);
+                case MYSQL -> new MySqlAccountStorage(plugin, settings.mysql(), new YamlAccountStorage(plugin));
+            };
+        } catch (AccountStorageException exception) {
+            throw new IllegalStateException("Failed to initialize account storage: " + settings.describe(), exception);
+        }
+    }
+
+    private SharedAccountStorage sharedStorage() {
+        return storage instanceof SharedAccountStorage sharedStorage ? sharedStorage : null;
+    }
+
+    private void closeQuietly(AccountStorage target) {
+        if (target == null) {
+            return;
+        }
+        try {
+            target.close();
+        } catch (AccountStorageException exception) {
+            plugin.getLogger().log(Level.WARNING, "Failed to close account storage cleanly", exception);
+        }
+    }
+
+    private void awaitExecutorIdle() {
+        Future<?> future = executor.submit(() -> {
+        });
+        try {
+            future.get(15, TimeUnit.SECONDS);
+        } catch (TimeoutException exception) {
+            plugin.getLogger().warning("Timed out waiting for queued account storage work to finish.");
+        } catch (Exception exception) {
+            plugin.getLogger().log(Level.WARNING, "Failed while waiting for queued account storage work to finish", exception);
+        }
+    }
+
+    private Map<UUID, Long> leaderboardBalances() {
+        return sharedStorage() != null ? globalBalances : balances;
+    }
+
+    private Map<UUID, String> leaderboardNames() {
+        return sharedStorage() != null ? globalNames : names;
+    }
+
+    private Map<UUID, AccountSnapshot.DailySaleSnapshot> leaderboardDailySales() {
+        return sharedStorage() != null ? globalDailySales : dailySales.entrySet().stream()
+                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, entry -> toSnapshot(entry.getValue())));
+    }
+
+    private DailySaleData getOrCreateTodayData(UUID uniqueId) {
+        String today = todayKey();
+        DailySaleData data = dailySales.computeIfAbsent(uniqueId, ignored -> new DailySaleData(today));
+        return normalizeDailyData(data, today);
+    }
+
+    private DailySaleData normalizeDailyData(DailySaleData data, String today) {
+        if (!today.equals(data.date)) {
+            data.reset(today);
+        }
+        return data;
+    }
+
+    private AccountSnapshot.DailySaleSnapshot normalizeDailySnapshot(AccountSnapshot.DailySaleSnapshot snapshot, String today) {
+        if (snapshot == null || !today.equals(snapshot.date())) {
+            return new AccountSnapshot.DailySaleSnapshot(today, 0L, Map.of());
+        }
+        return snapshot;
+    }
+
+    private DailySaleData toMutable(AccountSnapshot.DailySaleSnapshot snapshot) {
+        AccountSnapshot.DailySaleSnapshot normalized = normalizeDailySnapshot(snapshot, todayKey());
+        DailySaleData data = new DailySaleData(normalized.date());
+        data.soldEmc = normalized.soldEmc();
+        data.soldAmounts.putAll(normalized.soldAmounts());
+        return data;
+    }
+
+    private AccountSnapshot.DailySaleSnapshot toSnapshot(DailySaleData data) {
+        DailySaleData normalized = normalizeDailyData(data, todayKey());
+        return new AccountSnapshot.DailySaleSnapshot(normalized.date, normalized.soldEmc, normalized.soldAmounts);
+    }
+
+    private String todayKey() {
+        return LocalDate.now().toString();
+    }
+}

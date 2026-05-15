@@ -1,0 +1,54 @@
+Shop:
+  Id: "temporary"
+  Name: "&e&l临时分类"
+  Icon: "CHEST"
+  Lore:
+    - "&7临时加入、尚未正式归类的方块"
+  Order: 999
+  Materials: []
+
+Title: "&0[ &e临时分类 &0] &8待归档方块"
+
+GuiPlain:
+  - "####S####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L###B###N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"
+  "S":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l当前余额"
+    Lore:
+      - "&7账户: &f%emc% EMC"

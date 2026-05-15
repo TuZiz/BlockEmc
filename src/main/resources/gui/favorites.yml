@@ -1,0 +1,46 @@
+Title: "&0[ &d我的收藏 &0] &8快捷购买"
+
+GuiPlain:
+  - "####S####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L###B###N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"
+  "S":
+    IconFunction: "status"
+    Material: "NETHER_STAR"
+    Name: "&d&l收藏状态"
+    Lore:
+      - "&7收藏数量: &f%favorite_count%"
+      - "&7当前余额: &f%emc% EMC"

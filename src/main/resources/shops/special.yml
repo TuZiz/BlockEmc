@@ -1,0 +1,64 @@
+Shop:
+  Id: "special"
+  Name: "&5&l末地与特殊"
+  Icon: "PURPUR_BLOCK"
+  Lore:
+    - "&7末地石、紫珀与末地灯饰"
+  Order: 60
+  Materials:
+    - "END_ROD"
+    - "END_STONE"
+    - "END_STONE_BRICKS"
+    - "END_STONE_BRICK_SLAB"
+    - "END_STONE_BRICK_STAIRS"
+    - "END_STONE_BRICK_WALL"
+    - "PURPUR_BLOCK"
+    - "PURPUR_PILLAR"
+    - "PURPUR_SLAB"
+    - "PURPUR_STAIRS"
+
+Title: "&0[ &5末地特殊 &0] &8建筑商店"
+
+GuiPlain:
+  - "####S####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L###B###N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"
+  "S":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l当前余额"
+    Lore:
+      - "&7账户: &f%emc% EMC"

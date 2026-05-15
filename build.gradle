@@ -1,0 +1,52 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.blockemc'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+    maven {
+        url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/'
+    }
+}
+
+configurations {
+    shaded
+}
+
+dependencies {
+    compileOnly 'org.spigotmc:spigot-api:26.1.2-R0.1-SNAPSHOT'
+    shaded 'com.mysql:mysql-connector-j:8.4.0'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+}
+
+tasks.named('jar') {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from({
+        configurations.shaded.collect { it.isDirectory() ? it : zipTree(it) }
+    })
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+}
+
+processResources {
+    filteringCharset = 'UTF-8'
+    filesMatching('plugin.yml') {
+        expand(version: project.version)
+    }
+}
+
+wrapper {
+    gradleVersion = '9.2.0'
+    distributionType = Wrapper.DistributionType.BIN
+}

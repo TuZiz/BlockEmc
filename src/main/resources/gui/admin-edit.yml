@@ -1,0 +1,47 @@
+Title: "&4[ &c管理编辑 &4] &8EMC 调整面板"
+
+GuiPlain:
+  - "R-------R"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L---B---N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "R":
+    Material: "RED_STAINED_GLASS_PANE"
+    Name: "&c&l管理员模式"
+    Lore:
+      - "&7左键 / 右键 调整价格"
+      - "&7F 键 切换到下一个分类"
+      - "&7Q 键 切换上下架状态"
+      - "&7Ctrl+Q 删除 EMC"
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"

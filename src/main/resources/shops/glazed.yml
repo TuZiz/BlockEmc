@@ -1,0 +1,70 @@
+Shop:
+  Id: "glazed"
+  Name: "&e&l釉彩陶瓦"
+  Icon: "WHITE_GLAZED_TERRACOTTA"
+  Lore:
+    - "&7全部釉陶瓦图案方块"
+  Order: 45
+  Materials:
+    - "BLACK_GLAZED_TERRACOTTA"
+    - "BLUE_GLAZED_TERRACOTTA"
+    - "BROWN_GLAZED_TERRACOTTA"
+    - "CYAN_GLAZED_TERRACOTTA"
+    - "GRAY_GLAZED_TERRACOTTA"
+    - "GREEN_GLAZED_TERRACOTTA"
+    - "LIGHT_BLUE_GLAZED_TERRACOTTA"
+    - "LIGHT_GRAY_GLAZED_TERRACOTTA"
+    - "LIME_GLAZED_TERRACOTTA"
+    - "MAGENTA_GLAZED_TERRACOTTA"
+    - "ORANGE_GLAZED_TERRACOTTA"
+    - "PINK_GLAZED_TERRACOTTA"
+    - "PURPLE_GLAZED_TERRACOTTA"
+    - "RED_GLAZED_TERRACOTTA"
+    - "WHITE_GLAZED_TERRACOTTA"
+    - "YELLOW_GLAZED_TERRACOTTA"
+
+Title: "&0[ &e釉彩陶瓦 &0] &8建筑商店"
+
+GuiPlain:
+  - "####S####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L###B###N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"
+  "S":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l当前余额"
+    Lore:
+      - "&7账户: &f%emc% EMC"

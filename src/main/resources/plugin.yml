@@ -1,0 +1,24 @@
+name: BlockEmc
+main: com.blockemc.BlockEmcPlugin
+version: ${version}
+api-version: "26.1.2"
+authors: [ym]
+description: GUI EMC exchange plugin compatible with Spigot and Folia.
+commands:
+  uemc:
+    description: Open the BlockEmc GUI or manage EMC data.
+    usage: /uemc
+    permission: blockemc.use
+permissions:
+  blockemc.use:
+    default: true
+  blockemc.admin.gui:
+    default: op
+  blockemc.admin.edit:
+    default: op
+  blockemc.admin.balance:
+    default: op
+  blockemc.admin.reload:
+    default: op
+  blockemc.admin.audit:
+    default: op

@@ -1,0 +1,81 @@
+Shop:
+  Id: "polished"
+  Name: "&8&l磨制石材"
+  Icon: "POLISHED_DEEPSLATE"
+  Lore:
+    - "&7磨制、切制、砖制石材组件"
+  Order: 15
+  Materials:
+    - "CHISELED_POLISHED_BLACKSTONE"
+    - "CRACKED_POLISHED_BLACKSTONE_BRICKS"
+    - "POLISHED_ANDESITE"
+    - "POLISHED_ANDESITE_SLAB"
+    - "POLISHED_ANDESITE_STAIRS"
+    - "POLISHED_BLACKSTONE"
+    - "POLISHED_BLACKSTONE_BRICKS"
+    - "POLISHED_BLACKSTONE_BRICK_SLAB"
+    - "POLISHED_BLACKSTONE_BRICK_STAIRS"
+    - "POLISHED_BLACKSTONE_BRICK_WALL"
+    - "POLISHED_BLACKSTONE_SLAB"
+    - "POLISHED_BLACKSTONE_STAIRS"
+    - "POLISHED_BLACKSTONE_WALL"
+    - "POLISHED_DEEPSLATE"
+    - "POLISHED_DEEPSLATE_SLAB"
+    - "POLISHED_DEEPSLATE_STAIRS"
+    - "POLISHED_DEEPSLATE_WALL"
+    - "POLISHED_DIORITE"
+    - "POLISHED_DIORITE_SLAB"
+    - "POLISHED_DIORITE_STAIRS"
+    - "POLISHED_GRANITE"
+    - "POLISHED_GRANITE_SLAB"
+    - "POLISHED_GRANITE_STAIRS"
+    - "POLISHED_TUFF"
+    - "POLISHED_TUFF_SLAB"
+    - "POLISHED_TUFF_STAIRS"
+    - "POLISHED_TUFF_WALL"
+
+Title: "&0[ &8磨制石材 &0] &8建筑商店"
+
+GuiPlain:
+  - "####S####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L###B###N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"
+  "S":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l当前余额"
+    Lore:
+      - "&7账户: &f%emc% EMC"

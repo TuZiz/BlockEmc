@@ -1,0 +1,139 @@
+package com.blockemc;
+
+import com.blockemc.command.BlockEmcCommand;
+import com.blockemc.compat.ServerScheduler;
+import com.blockemc.config.GuiConfigLoader;
+import com.blockemc.config.MessageService;
+import com.blockemc.config.ShopRegistry;
+import com.blockemc.config.ValueRegistry;
+import com.blockemc.listener.MenuListener;
+import com.blockemc.model.LayoutTemplate;
+import com.blockemc.model.PluginSettings;
+import com.blockemc.model.StorageSettings;
+import com.blockemc.service.AccountService;
+import com.blockemc.service.ExchangeService;
+import com.blockemc.service.GuiService;
+import java.io.File;
+import java.util.List;
+import java.util.Objects;
+import org.bukkit.command.PluginCommand;
+import org.bukkit.plugin.java.JavaPlugin;
+
+public final class BlockEmcPlugin extends JavaPlugin {
+
+    private PluginSettings settings;
+    private StorageSettings storageSettings;
+    private MessageService messages;
+    private GuiConfigLoader guiConfigLoader;
+    private ValueRegistry valueRegistry;
+    private ShopRegistry shopRegistry;
+    private AccountService accountService;
+    private ExchangeService exchangeService;
+    private GuiService guiService;
+    private ServerScheduler scheduler;
+
+    @Override
+    public void onEnable() {
+        saveDefaultConfig();
+        saveBundledResources();
+
+        this.settings = PluginSettings.load(getConfig());
+        this.storageSettings = StorageSettings.load(getConfig());
+        this.messages = new MessageService(this);
+        this.guiConfigLoader = new GuiConfigLoader();
+        this.valueRegistry = new ValueRegistry(this);
+        this.valueRegistry.reload();
+        this.shopRegistry = new ShopRegistry(this, guiConfigLoader, valueRegistry);
+        this.shopRegistry.reload();
+        this.accountService = new AccountService(this, storageSettings);
+        this.accountService.reload();
+        this.accountService.startAutoSave();
+
+        this.exchangeService = new ExchangeService(settings, valueRegistry, accountService);
+        this.scheduler = new ServerScheduler(this);
+        this.guiService = new GuiService(scheduler, messages, valueRegistry, shopRegistry, accountService, exchangeService);
+        reloadGuiLayouts();
+
+        BlockEmcCommand command = new BlockEmcCommand(this, messages, valueRegistry, shopRegistry, accountService, guiService);
+        PluginCommand pluginCommand = Objects.requireNonNull(getCommand("uemc"), "uemc command missing in plugin.yml");
+        pluginCommand.setExecutor(command);
+        pluginCommand.setTabCompleter(command);
+        getServer().getPluginManager().registerEvents(new MenuListener(guiService, accountService), this);
+
+        getLogger().info("BlockEmc enabled on " + (scheduler.isFolia() ? "Folia" : "Spigot/Paper")
+                + ", storage=" + accountService.getStorageDescription());
+    }
+
+    @Override
+    public void onDisable() {
+        if (guiService != null) {
+            guiService.closeAll();
+        }
+        if (accountService != null) {
+            accountService.shutdown();
+        }
+    }
+
+    public void reloadPluginState() {
+        reloadConfig();
+        messages.reload();
+        settings = PluginSettings.load(getConfig());
+        storageSettings = StorageSettings.load(getConfig());
+        valueRegistry.reload();
+        shopRegistry.reload();
+        accountService.applyStorageSettings(storageSettings);
+        accountService.reload();
+        exchangeService.updateSettings(settings);
+        reloadGuiLayouts();
+    }
+
+    private void reloadGuiLayouts() {
+        LayoutTemplate mainLayout = guiConfigLoader.load(new File(getDataFolder(), "gui/main.yml"));
+        LayoutTemplate categoriesLayout = guiConfigLoader.load(new File(getDataFolder(), "gui/categories.yml"));
+        LayoutTemplate bulkSellLayout = guiConfigLoader.load(new File(getDataFolder(), "gui/bulk-sell.yml"));
+        LayoutTemplate adminLayout = guiConfigLoader.load(new File(getDataFolder(), "gui/admin-edit.yml"));
+        LayoutTemplate favoritesLayout = guiConfigLoader.load(new File(getDataFolder(), "gui/favorites.yml"));
+        LayoutTemplate confirmLayout = guiConfigLoader.load(new File(getDataFolder(), "gui/confirm.yml"));
+        guiService.reloadLayouts(mainLayout, categoriesLayout, bulkSellLayout, adminLayout, favoritesLayout, confirmLayout, settings);
+    }
+
+    private void saveBundledResources() {
+        for (String resource : List.of(
+                "values.yml",
+                "accounts.yml",
+                "temporary-materials.yml",
+                "gui/main.yml",
+                "gui/categories.yml",
+                "gui/bulk-sell.yml",
+                "gui/admin-edit.yml",
+                "gui/favorites.yml",
+                "gui/confirm.yml",
+                "lang/zh_CN.yml",
+                "shops/wool.yml",
+                "shops/wood.yml",
+                "shops/temporary.yml",
+                "shops/stone.yml",
+                "shops/special.yml",
+                "shops/redstone.yml",
+                "shops/prismarine.yml",
+                "shops/polished.yml",
+                "shops/nether.yml",
+                "shops/nature.yml",
+                "shops/modern.yml",
+                "shops/glazed.yml",
+                "shops/glass.yml",
+                "shops/decoration.yml",
+                "shops/copper.yml",
+                "shops/colored.yml"
+        )) {
+            saveResourceIfMissing(resource);
+        }
+    }
+
+    private void saveResourceIfMissing(String path) {
+        File target = new File(getDataFolder(), path);
+        if (!target.exists()) {
+            saveResource(path, false);
+        }
+    }
+}

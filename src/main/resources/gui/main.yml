@@ -1,0 +1,76 @@
+Title: "&0[ &6EMC &0] &8建筑交换中心"
+
+GuiPlain:
+  - "####S####"
+  - "#-------#"
+  - "#B-H-R-F#"
+  - "#-------#"
+  - "####Q####"
+  - "####X####"
+
+GuiKey:
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "B":
+    IconFunction: "buildings"
+    Material: "BRICKS"
+    Name: "&6&l分类商店"
+    Lore:
+      - "&8• &7按分类浏览常用建筑方块"
+      - "&8• &7已收藏的方块会优先出现在商店内"
+      - ""
+      - "&e点击进入"
+  "R":
+    IconFunction: "recommend"
+    Material: "COMPASS"
+    Name: "&d&l灵感推荐"
+    Lore:
+      - "&8• &7根据你的收藏偏好推荐建筑搭配"
+      - "&8• &7同时参考全服热门建材组合"
+      - ""
+      - "&e点击查看"
+  "F":
+    IconFunction: "favorites"
+    Material: "NETHER_STAR"
+    Name: "&d&l我的收藏"
+    Lore:
+      - "&8• &7快速进入你常买的建筑方块"
+      - "&8• &7当前收藏数量: &f%favorite_count%"
+      - ""
+      - "&e点击查看"
+  "H":
+    IconFunction: "hot"
+    Material: "BLAZE_POWDER"
+    Name: "&6&l热卖榜"
+    Lore:
+      - "&8• &7看看全服玩家常买的热门建材"
+      - "&8• &7适合挑选高频搭配与常备方块"
+      - ""
+      - "&e点击查看"
+  "Q":
+    IconFunction: "bulk_sell"
+    Material: "CHEST"
+    Name: "&a&l批量售卖"
+    Lore:
+      - "&8• &7把可回收方块放入售卖区"
+      - "&8• &7高价值售卖会弹出二次确认"
+      - ""
+      - "&e点击前往"
+  "S":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l今日账户状态"
+    Lore:
+      - "&7当前余额: &f%emc% EMC"
+      - "&7今日售卖收益: &a%today_emc% EMC"
+      - "&7今日主售数量: &f%today_top_amount%"
+      - ""
+      - "&8输入 /uemc top today 查看今日排行"
+  "X":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c&l关闭菜单"

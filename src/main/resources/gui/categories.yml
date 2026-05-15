@@ -1,0 +1,53 @@
+Title: "&0[ &6分类商店 &0] &8建筑目录"
+
+GuiPlain:
+  - "T###S####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L###B###N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "T":
+    IconFunction: "temporary"
+    Material: "CLOCK"
+    Name: "&e&l待分类物品"
+    Lore:
+      - "&7显示管理员临时加入但尚未分配分类的方块"
+      - "&7如果这里为空，说明所有物品都已归类"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"
+  "S":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l账户状态"
+    Lore:
+      - "&7当前余额: &f%emc% EMC"
+      - "&7今日售卖收益: &a%today_emc% EMC"

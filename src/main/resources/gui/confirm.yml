@@ -1,0 +1,25 @@
+Title: "&0[ &6交易确认 &0]"
+
+GuiPlain:
+  - "#########"
+  - "##C#P#X##"
+  - "#########"
+
+GuiKey:
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "C":
+    IconFunction: "confirm"
+    Material: "EMERALD_BLOCK"
+    Name: "&a&l确认执行"
+    Lore:
+      - "&7确认后会立即执行当前交易"
+  "P":
+    IconFunction: "preview"
+    Material: "PAPER"
+    Name: "&e&l本次交易预览"
+  "X":
+    IconFunction: "cancel"
+    Material: "BARRIER"
+    Name: "&c&l取消返回"

@@ -1,0 +1,27 @@
+# BlockEmc 全局配置
+
+exchange:
+  # 批量出售返还比例，最终收益 = EMC * 数量 * 比例
+  recycle-rate: 0.75
+  # 快捷购买与全买时的单次上限
+  max-single-trade: 64
+
+confirm:
+  # 达到该消耗时，购买前弹出确认 GUI
+  high-value-buy-emc: 4096
+  # 达到该收益时，批量出售前弹出确认 GUI
+  high-value-bulk-sell-emc: 4096
+
+storage:
+  # Supported values: YAML, MYSQL
+  type: MYSQL
+  mysql:
+    host: 127.0.0.1
+    port: 3306
+    database: blockemc
+    username: root
+    password: "186345"
+    use-ssl: false
+    table-prefix: blockemc_
+    import-from-yaml-on-first-run: true
+    refresh-seconds: 30

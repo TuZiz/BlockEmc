@@ -1,0 +1,85 @@
+Shop:
+  Id: "modern"
+  Name: "&d&l26.1 装饰建材"
+  Icon: "PALE_OAK_PLANKS"
+  Lore:
+    - "&7苍白橡木、树脂砖、苍白苔藓和 26.1 景观装饰"
+  Order: 35
+  Materials:
+    - "BAMBOO_MOSAIC"
+    - "BAMBOO_MOSAIC_SLAB"
+    - "BAMBOO_MOSAIC_STAIRS"
+    - "BUSH"
+    - "CACTUS_FLOWER"
+    - "CHISELED_RESIN_BRICKS"
+    - "CLOSED_EYEBLOSSOM"
+    - "FIREFLY_BUSH"
+    - "GOLDEN_DANDELION"
+    - "LEAF_LITTER"
+    - "OPEN_EYEBLOSSOM"
+    - "PALE_HANGING_MOSS"
+    - "PALE_MOSS_BLOCK"
+    - "PALE_OAK_DOOR"
+    - "PALE_OAK_FENCE"
+    - "PALE_OAK_FENCE_GATE"
+    - "PALE_OAK_HANGING_SIGN"
+    - "PALE_OAK_LOG"
+    - "PALE_OAK_PLANKS"
+    - "PALE_OAK_SIGN"
+    - "PALE_OAK_SLAB"
+    - "PALE_OAK_STAIRS"
+    - "PALE_OAK_TRAPDOOR"
+    - "PALE_OAK_WOOD"
+    - "RESIN_BLOCK"
+    - "RESIN_BRICKS"
+    - "RESIN_BRICK_SLAB"
+    - "RESIN_BRICK_STAIRS"
+    - "RESIN_BRICK_WALL"
+    - "STRIPPED_PALE_OAK_LOG"
+    - "STRIPPED_PALE_OAK_WOOD"
+
+Title: "&0[ &d26.1 装饰建材 &0] &8建筑商店"
+
+GuiPlain:
+  - "####S####"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "#@@@@@@@#"
+  - "L###B###N"
+
+GuiKey:
+  "@":
+    IconFunction: "item"
+  "#":
+    Material: "BLACK_STAINED_GLASS_PANE"
+    Name: " "
+  "-":
+    Material: "GRAY_STAINED_GLASS_PANE"
+    Name: " "
+  "L":
+    IconFunction: "last"
+    has:
+      Material: "ARROW"
+      Name: "&a上一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "N":
+    IconFunction: "next"
+    has:
+      Material: "ARROW"
+      Name: "&a下一页"
+    normal:
+      Material: "GRAY_STAINED_GLASS_PANE"
+      Name: " "
+  "B":
+    IconFunction: "back"
+    Material: "BARRIER"
+    Name: "&c返回"
+  "S":
+    IconFunction: "status"
+    Material: "SUNFLOWER"
+    Name: "&e&l当前余额"
+    Lore:
+      - "&7账户: &f%emc% EMC"
