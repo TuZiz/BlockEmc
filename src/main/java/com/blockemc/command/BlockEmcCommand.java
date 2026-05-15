@@ -1,6 +1,7 @@
 package com.blockemc.command;
 
 import com.blockemc.BlockEmcPlugin;
+import com.blockemc.compat.ServerScheduler;
 import com.blockemc.config.MessageService;
 import com.blockemc.config.ShopRegistry;
 import com.blockemc.config.ValueRegistry;
@@ -32,6 +33,7 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
     private final AccountService accountService;
     private final GuiService guiService;
     private final ShopAuditService auditService;
+    private final ServerScheduler scheduler;
 
     public BlockEmcCommand(
             BlockEmcPlugin plugin,
@@ -39,7 +41,8 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
             ValueRegistry valueRegistry,
             ShopRegistry shopRegistry,
             AccountService accountService,
-            GuiService guiService
+            GuiService guiService,
+            ServerScheduler scheduler
     ) {
         this.plugin = plugin;
         this.messages = messages;
@@ -47,6 +50,7 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
         this.shopRegistry = shopRegistry;
         this.accountService = accountService;
         this.guiService = guiService;
+        this.scheduler = scheduler;
         this.auditService = new ShopAuditService(plugin, valueRegistry, shopRegistry);
     }
 
@@ -301,30 +305,36 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
             case "give" -> {
                 long before = accountService.getCachedBalance(target.getUniqueId());
                 accountService.tryAddBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
-                    auditAdmin(target, "ADMIN_GIVE", amount, before, success, success ? "" : "balance limit");
-                    if (success) {
-                        messages.send(sender, "uemc-admin-add-player", target.getName(), amount, accountService.getCachedBalance(target.getUniqueId()));
-                    } else {
-                        messages.send(sender, "uemc-amount-too-large");
-                    }
+                    runForSender(sender, target, () -> {
+                        auditAdmin(target, "ADMIN_GIVE", amount, before, success, success ? "" : "balance limit");
+                        if (success) {
+                            messages.send(sender, "uemc-admin-add-player", target.getName(), amount, accountService.getCachedBalance(target.getUniqueId()));
+                        } else {
+                            messages.send(sender, "uemc-amount-too-large");
+                        }
+                    });
                 });
             }
             case "set" -> {
                 long before = accountService.getCachedBalance(target.getUniqueId());
                 accountService.setBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
-                    auditAdmin(target, "ADMIN_SET", amount, before, success, "");
-                    messages.send(sender, "uemc-admin-set-player", target.getName(), accountService.getCachedBalance(target.getUniqueId()));
+                    runForSender(sender, target, () -> {
+                        auditAdmin(target, "ADMIN_SET", amount, before, success, "");
+                        messages.send(sender, "uemc-admin-set-player", target.getName(), accountService.getCachedBalance(target.getUniqueId()));
+                    });
                 });
             }
             case "take" -> {
                 long before = accountService.getCachedBalance(target.getUniqueId());
                 accountService.tryTakeBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
-                    auditAdmin(target, "ADMIN_TAKE", amount, before, success, success ? "" : "insufficient balance");
-                    if (success) {
-                        messages.send(sender, "uemc-admin-take-player", target.getName(), amount, accountService.getCachedBalance(target.getUniqueId()));
-                    } else {
-                        messages.send(sender, "uemc-emc-not-enough", amount);
-                    }
+                    runForSender(sender, target, () -> {
+                        auditAdmin(target, "ADMIN_TAKE", amount, before, success, success ? "" : "insufficient balance");
+                        if (success) {
+                            messages.send(sender, "uemc-admin-take-player", target.getName(), amount, accountService.getCachedBalance(target.getUniqueId()));
+                        } else {
+                            messages.send(sender, "uemc-emc-not-enough", amount);
+                        }
+                    });
                 });
             }
             default -> {
@@ -361,6 +371,16 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
                 Instant.now(),
                 plugin.getServer().getName()
         ));
+    }
+
+    private void runForSender(CommandSender sender, Player target, Runnable task) {
+        if (sender instanceof Player player) {
+            scheduler.runForPlayer(player, task);
+        } else if (target != null && target.isOnline()) {
+            scheduler.runForPlayer(target, task);
+        } else {
+            scheduler.runGlobal(task);
+        }
     }
 
     private long parsePositiveLong(String value, long fallback) {

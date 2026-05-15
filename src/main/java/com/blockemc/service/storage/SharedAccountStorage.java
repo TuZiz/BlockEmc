@@ -2,7 +2,10 @@ package com.blockemc.service.storage;
 
 import java.util.Map;
 import java.util.UUID;
+import java.util.List;
 import com.blockemc.service.audit.TransactionAuditRecord;
+import com.blockemc.service.audit.PendingSellStatus;
+import com.blockemc.service.audit.PendingSellTransaction;
 import org.bukkit.Material;
 
 public interface SharedAccountStorage extends AccountStorage {
@@ -32,6 +35,16 @@ public interface SharedAccountStorage extends AccountStorage {
     void recordPurchase(UUID uniqueId, String name, Material material, int amount) throws AccountStorageException;
 
     default void recordAudit(TransactionAuditRecord record) throws AccountStorageException {
+    }
+
+    default void savePendingSell(PendingSellTransaction transaction) throws AccountStorageException {
+    }
+
+    default void updatePendingSellStatus(String transactionId, PendingSellStatus status, String reason) throws AccountStorageException {
+    }
+
+    default List<PendingSellTransaction> loadOpenPendingSells() throws AccountStorageException {
+        return List.of();
     }
 
     void importFromYamlIfNeeded() throws AccountStorageException;

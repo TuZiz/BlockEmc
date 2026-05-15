@@ -1,6 +1,8 @@
 package com.blockemc.service.storage;
 
 import com.blockemc.model.StorageSettings;
+import com.blockemc.service.audit.PendingSellStatus;
+import com.blockemc.service.audit.PendingSellTransaction;
 import com.blockemc.service.audit.TransactionAuditRecord;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
@@ -16,6 +18,8 @@ import java.time.LocalDate;
 import java.time.format.DateTimeParseException;
 import java.util.EnumSet;
 import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -46,6 +50,7 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
     private final String dailySaleMaterialsTable;
     private final String purchaseHeatTable;
     private final String auditTable;
+    private final String pendingTransactionsTable;
     private final HikariDataSource dataSource;
 
     public MySqlAccountStorage(
@@ -63,6 +68,7 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
         this.dailySaleMaterialsTable = settings.tablePrefix() + "daily_sale_materials";
         this.purchaseHeatTable = settings.tablePrefix() + "purchase_heat";
         this.auditTable = settings.tablePrefix() + "audit_log";
+        this.pendingTransactionsTable = settings.tablePrefix() + "pending_transactions";
         validateSettings();
         this.dataSource = createDataSource();
         try (Connection connection = openConnection()) {
@@ -298,6 +304,81 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
     }
 
     @Override
+    public void savePendingSell(PendingSellTransaction transaction) throws AccountStorageException {
+        String sql = "INSERT INTO " + quoted(pendingTransactionsTable) + " ("
+                + "transaction_id, player_uuid, player_name, operation_type, materials, reward, status, created_at, updated_at, failure_reason"
+                + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                + "ON DUPLICATE KEY UPDATE status = VALUES(status), updated_at = VALUES(updated_at), failure_reason = VALUES(failure_reason)";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, transaction.transactionId());
+            statement.setString(2, transaction.playerUuid().toString());
+            statement.setString(3, normalizeName(transaction.playerUuid(), transaction.playerName()));
+            statement.setString(4, transaction.operationType());
+            statement.setString(5, serializeMaterials(transaction.materials()));
+            statement.setLong(6, transaction.reward());
+            statement.setString(7, transaction.status().name());
+            statement.setString(8, transaction.createdAt().toString());
+            statement.setString(9, transaction.updatedAt().toString());
+            statement.setString(10, transaction.failureReason());
+            statement.executeUpdate();
+        } catch (SQLException exception) {
+            throw new AccountStorageException("Failed to save MySQL pending sell transaction", exception);
+        }
+    }
+
+    @Override
+    public void updatePendingSellStatus(String transactionId, PendingSellStatus status, String reason) throws AccountStorageException {
+        String sql = "UPDATE " + quoted(pendingTransactionsTable)
+                + " SET status = ?, updated_at = ?, failure_reason = ? WHERE transaction_id = ?";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, status.name());
+            statement.setString(2, java.time.Instant.now().toString());
+            statement.setString(3, reason == null ? "" : reason);
+            statement.setString(4, transactionId);
+            statement.executeUpdate();
+        } catch (SQLException exception) {
+            throw new AccountStorageException("Failed to update MySQL pending sell transaction", exception);
+        }
+    }
+
+    @Override
+    public List<PendingSellTransaction> loadOpenPendingSells() throws AccountStorageException {
+        String sql = "SELECT transaction_id, player_uuid, player_name, operation_type, materials, reward, status, created_at, updated_at, failure_reason "
+                + "FROM " + quoted(pendingTransactionsTable) + " WHERE status IN (?, ?)";
+        List<PendingSellTransaction> transactions = new ArrayList<>();
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, PendingSellStatus.PENDING_REMOVAL.name());
+            statement.setString(2, PendingSellStatus.ITEMS_REMOVED.name());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                while (resultSet.next()) {
+                    UUID uniqueId = parseUuid(resultSet.getString("player_uuid"));
+                    if (uniqueId == null) {
+                        continue;
+                    }
+                    transactions.add(new PendingSellTransaction(
+                            resultSet.getString("transaction_id"),
+                            uniqueId,
+                            resultSet.getString("player_name"),
+                            resultSet.getString("operation_type"),
+                            deserializeMaterials(resultSet.getString("materials")),
+                            resultSet.getLong("reward"),
+                            PendingSellStatus.valueOf(resultSet.getString("status")),
+                            parseInstant(resultSet.getString("created_at")),
+                            parseInstant(resultSet.getString("updated_at")),
+                            resultSet.getString("failure_reason")
+                    ));
+                }
+            }
+        } catch (SQLException exception) {
+            throw new AccountStorageException("Failed to load MySQL pending sell transactions", exception);
+        }
+        return transactions;
+    }
+
+    @Override
     public void importFromYamlIfNeeded() throws AccountStorageException {
         if (!settings.importFromYamlOnFirstRun() || hasImportMarker() || !migrationSource.exists()) {
             return;
@@ -435,6 +516,20 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
                         server_name VARCHAR(64) NOT NULL
                     )
                     """.formatted(quoted(auditTable)));
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS %s (
+                        transaction_id VARCHAR(64) NOT NULL PRIMARY KEY,
+                        player_uuid CHAR(36) NOT NULL,
+                        player_name VARCHAR(32) NOT NULL,
+                        operation_type VARCHAR(32) NOT NULL,
+                        materials TEXT NOT NULL,
+                        reward BIGINT NOT NULL,
+                        status VARCHAR(32) NOT NULL,
+                        created_at VARCHAR(64) NOT NULL,
+                        updated_at VARCHAR(64) NOT NULL,
+                        failure_reason VARCHAR(255) NOT NULL
+                    )
+                    """.formatted(quoted(pendingTransactionsTable)));
         }
     }
 
@@ -1022,6 +1117,47 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
         }
         String trimmed = value.trim();
         return trimmed.length() > 32 ? trimmed.substring(0, 32) : trimmed;
+    }
+
+    private String serializeMaterials(Map<String, Integer> materials) {
+        if (materials == null || materials.isEmpty()) {
+            return "";
+        }
+        return materials.entrySet().stream()
+                .filter(entry -> entry.getKey() != null && entry.getValue() != null && entry.getValue() > 0)
+                .sorted(Map.Entry.comparingByKey())
+                .map(entry -> entry.getKey() + ":" + entry.getValue())
+                .collect(java.util.stream.Collectors.joining(","));
+    }
+
+    private Map<String, Integer> deserializeMaterials(String value) {
+        Map<String, Integer> materials = new HashMap<>();
+        if (value == null || value.isBlank()) {
+            return materials;
+        }
+        for (String part : value.split(",")) {
+            String[] pieces = part.split(":", 2);
+            if (pieces.length != 2 || Material.matchMaterial(pieces[0]) == null) {
+                continue;
+            }
+            try {
+                int amount = Integer.parseInt(pieces[1]);
+                if (amount > 0) {
+                    materials.put(pieces[0], amount);
+                }
+            } catch (NumberFormatException ignored) {
+                plugin.getLogger().warning("Skipping invalid pending transaction material amount: " + part);
+            }
+        }
+        return materials;
+    }
+
+    private java.time.Instant parseInstant(String value) {
+        try {
+            return java.time.Instant.parse(value);
+        } catch (RuntimeException exception) {
+            return java.time.Instant.now();
+        }
     }
 
     private UUID parseUuid(String value) {

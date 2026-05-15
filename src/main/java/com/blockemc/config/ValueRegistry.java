@@ -5,6 +5,8 @@ import com.blockemc.model.MaterialValue;
 import com.blockemc.model.PluginSettings;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -14,6 +16,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.logging.Level;
 import org.bukkit.Material;
 import org.bukkit.configuration.ConfigurationSection;
@@ -25,11 +32,17 @@ public final class ValueRegistry {
     private final JavaPlugin plugin;
     private final File valuesFile;
     private final File temporaryFile;
+    private final ExecutorService saveExecutor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "BlockEmc-ValueRegistry-IO");
+        thread.setDaemon(true);
+        return thread;
+    });
     private final Map<Material, MaterialValue> values = new LinkedHashMap<>();
     private final Set<Material> temporaryMaterials = EnumSet.noneOf(Material.class);
     private final Set<Material> hiddenMaterials = EnumSet.noneOf(Material.class);
     private final Map<Material, String> categoryOverrides = new LinkedHashMap<>();
     private PluginSettings settings;
+    private volatile Future<?> lastSaveTask;
 
     public ValueRegistry(JavaPlugin plugin, PluginSettings settings) {
         this.plugin = plugin;
@@ -40,6 +53,31 @@ public final class ValueRegistry {
 
     public void updateSettings(PluginSettings settings) {
         this.settings = settings;
+    }
+
+    public void flushSaves() {
+        Future<?> task = lastSaveTask;
+        if (task != null) {
+            try {
+                task.get(10, TimeUnit.SECONDS);
+            } catch (TimeoutException exception) {
+                plugin.getLogger().severe("Timed out waiting for ValueRegistry YAML save to finish.");
+            } catch (Exception exception) {
+                plugin.getLogger().log(Level.SEVERE, "Failed while flushing ValueRegistry YAML save", exception);
+            }
+        }
+    }
+
+    public void shutdown() {
+        flushSaves();
+        saveExecutor.shutdown();
+        try {
+            if (!saveExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                plugin.getLogger().severe("Timed out stopping ValueRegistry save executor.");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     public void reload() {
@@ -205,20 +243,38 @@ public final class ValueRegistry {
                 .forEach(entry -> categorySection.set(entry.getKey().name(), entry.getValue()));
 
         configuration.set("custom-items", new LinkedHashMap<>());
-        try {
-            configuration.save(valuesFile);
-        } catch (IOException exception) {
-            plugin.getLogger().log(Level.SEVERE, "保存 values.yml 失败", exception);
-        }
+        saveYamlAsync(configuration, valuesFile, "values.yml");
     }
 
     private void saveTemporaryMaterials() {
         YamlConfiguration configuration = new YamlConfiguration();
         configuration.set("materials", getTemporaryMaterials().stream().map(Material::name).toList());
-        try {
-            configuration.save(temporaryFile);
-        } catch (IOException exception) {
-            plugin.getLogger().log(Level.SEVERE, "保存 temporary-materials.yml 失败", exception);
-        }
+        saveYamlAsync(configuration, temporaryFile, "temporary-materials.yml");
+    }
+
+    private void saveYamlAsync(YamlConfiguration configuration, File target, String description) {
+        lastSaveTask = saveExecutor.submit(() -> {
+            File parent = target.getParentFile();
+            if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                plugin.getLogger().severe("Failed to create directory for " + description);
+                return;
+            }
+            File temporaryTarget = new File(parent, target.getName() + ".tmp");
+            try {
+                configuration.save(temporaryTarget);
+                try {
+                    Files.move(
+                            temporaryTarget.toPath(),
+                            target.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.ATOMIC_MOVE
+                    );
+                } catch (IOException ignored) {
+                    Files.move(temporaryTarget.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                }
+            } catch (IOException exception) {
+                plugin.getLogger().log(Level.SEVERE, "Failed to save " + description, exception);
+            }
+        });
     }
 }

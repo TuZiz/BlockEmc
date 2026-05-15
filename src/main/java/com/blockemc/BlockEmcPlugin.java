@@ -56,12 +56,13 @@ public final class BlockEmcPlugin extends JavaPlugin {
         this.accountService = new AccountService(this, storageSettings, settings);
         this.accountService.reload();
         this.accountService.startAutoSave();
+        this.accountService.recoverPendingSells();
 
         this.exchangeService = new ExchangeService(this, settings, valueRegistry, accountService, scheduler);
         this.guiService = new GuiService(scheduler, messages, valueRegistry, shopRegistry, accountService, exchangeService);
         reloadGuiLayouts();
 
-        BlockEmcCommand command = new BlockEmcCommand(this, messages, valueRegistry, shopRegistry, accountService, guiService);
+        BlockEmcCommand command = new BlockEmcCommand(this, messages, valueRegistry, shopRegistry, accountService, guiService, scheduler);
         PluginCommand pluginCommand = Objects.requireNonNull(getCommand("uemc"), "uemc command missing in plugin.yml");
         pluginCommand.setExecutor(command);
         pluginCommand.setTabCompleter(command);
@@ -76,6 +77,9 @@ public final class BlockEmcPlugin extends JavaPlugin {
         if (guiService != null) {
             guiService.closeAll();
         }
+        if (valueRegistry != null) {
+            valueRegistry.shutdown();
+        }
         if (accountService != null) {
             accountService.shutdown();
         }
@@ -87,6 +91,7 @@ public final class BlockEmcPlugin extends JavaPlugin {
         messages.reload();
         settings = PluginSettings.load(getConfig());
         storageSettings = StorageSettings.load(getConfig());
+        valueRegistry.flushSaves();
         valueRegistry.updateSettings(settings);
         valueRegistry.reload();
         shopRegistry.reload();

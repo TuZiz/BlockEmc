@@ -2,6 +2,8 @@ package com.blockemc.service;
 
 import com.blockemc.model.PluginSettings;
 import com.blockemc.model.StorageSettings;
+import com.blockemc.service.audit.PendingSellStatus;
+import com.blockemc.service.audit.PendingSellTransaction;
 import com.blockemc.service.audit.TransactionAuditRecord;
 import com.blockemc.service.storage.AccountSnapshot;
 import com.blockemc.service.storage.AccountStorage;
@@ -38,6 +40,8 @@ import java.util.function.Supplier;
 import java.util.logging.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -487,6 +491,54 @@ public final class AccountService {
         });
     }
 
+    public CompletableFuture<Void> savePendingSell(PendingSellTransaction transaction) {
+        return supplyAccountIO(() -> {
+            try {
+                SharedAccountStorage sharedStorage = sharedStorage();
+                if (sharedStorage != null) {
+                    sharedStorage.savePendingSell(transaction);
+                } else {
+                    saveLocalPendingSell(transaction);
+                }
+                return null;
+            } catch (AccountStorageException exception) {
+                throw new CompletionException(exception);
+            }
+        });
+    }
+
+    public CompletableFuture<Void> updatePendingSellStatus(String transactionId, PendingSellStatus status, String reason) {
+        return supplyAccountIO(() -> {
+            try {
+                SharedAccountStorage sharedStorage = sharedStorage();
+                if (sharedStorage != null) {
+                    sharedStorage.updatePendingSellStatus(transactionId, status, reason);
+                } else {
+                    updateLocalPendingSellStatus(transactionId, status, reason);
+                }
+                return null;
+            } catch (AccountStorageException exception) {
+                throw new CompletionException(exception);
+            }
+        });
+    }
+
+    public void recoverPendingSells() {
+        executor.execute(() -> {
+            try {
+                SharedAccountStorage sharedStorage = sharedStorage();
+                List<PendingSellTransaction> transactions = sharedStorage == null
+                        ? loadLocalOpenPendingSells()
+                        : sharedStorage.loadOpenPendingSells();
+                for (PendingSellTransaction transaction : transactions) {
+                    recoverPendingSell(transaction);
+                }
+            } catch (Exception exception) {
+                plugin.getLogger().log(Level.SEVERE, "Failed to recover pending sell transactions", exception);
+            }
+        });
+    }
+
     public synchronized DailySaleSummary getTodaySummary(UUID uniqueId) {
         DailySaleData data = dailySales.get(uniqueId);
         if (data == null) {
@@ -665,6 +717,182 @@ public final class AccountService {
                 nullToEmpty(record.serverName())
         ) + System.lineSeparator();
         Files.writeString(auditFile.toPath(), line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+    }
+
+    private void saveLocalPendingSell(PendingSellTransaction transaction) throws AccountStorageException {
+        YamlConfiguration configuration = loadPendingConfiguration();
+        writePendingSection(configuration, transaction);
+        savePendingConfiguration(configuration);
+    }
+
+    private void updateLocalPendingSellStatus(String transactionId, PendingSellStatus status, String reason) throws AccountStorageException {
+        YamlConfiguration configuration = loadPendingConfiguration();
+        ConfigurationSection section = configuration.getConfigurationSection("transactions." + transactionId);
+        if (section == null) {
+            return;
+        }
+        section.set("status", status.name());
+        section.set("updated-at", java.time.Instant.now().toString());
+        section.set("failure-reason", reason == null ? "" : reason);
+        savePendingConfiguration(configuration);
+    }
+
+    private List<PendingSellTransaction> loadLocalOpenPendingSells() {
+        YamlConfiguration configuration = loadPendingConfiguration();
+        ConfigurationSection root = configuration.getConfigurationSection("transactions");
+        if (root == null) {
+            return List.of();
+        }
+        java.util.ArrayList<PendingSellTransaction> transactions = new java.util.ArrayList<>();
+        for (String id : root.getKeys(false)) {
+            ConfigurationSection section = root.getConfigurationSection(id);
+            if (section == null) {
+                continue;
+            }
+            PendingSellStatus status = parsePendingStatus(section.getString("status"));
+            if (status != PendingSellStatus.PENDING_REMOVAL && status != PendingSellStatus.ITEMS_REMOVED) {
+                continue;
+            }
+            try {
+                UUID uuid = UUID.fromString(section.getString("player-uuid", ""));
+                Map<String, Integer> materials = new HashMap<>();
+                ConfigurationSection materialSection = section.getConfigurationSection("materials");
+                if (materialSection != null) {
+                    for (String material : materialSection.getKeys(false)) {
+                        int amount = materialSection.getInt(material);
+                        if (amount > 0 && Material.matchMaterial(material) != null) {
+                            materials.put(material, amount);
+                        }
+                    }
+                }
+                transactions.add(new PendingSellTransaction(
+                        id,
+                        uuid,
+                        section.getString("player-name", uuid.toString()),
+                        section.getString("operation-type", "SELL"),
+                        materials,
+                        section.getLong("reward"),
+                        status,
+                        parseInstant(section.getString("created-at")),
+                        parseInstant(section.getString("updated-at")),
+                        section.getString("failure-reason", "")
+                ));
+            } catch (IllegalArgumentException exception) {
+                plugin.getLogger().warning("Skipping invalid pending sell transaction in YAML: " + id);
+            }
+        }
+        return transactions;
+    }
+
+    private void recoverPendingSell(PendingSellTransaction transaction) throws AccountStorageException {
+        if (transaction.status() == PendingSellStatus.PENDING_REMOVAL) {
+            updateRecoveredPending(transaction.transactionId(), PendingSellStatus.FAILED, "server stopped before item removal");
+            plugin.getLogger().warning("Marked pending sell " + transaction.transactionId() + " as failed because item removal had not started.");
+            return;
+        }
+        if (transaction.status() != PendingSellStatus.ITEMS_REMOVED) {
+            return;
+        }
+        boolean credited = creditRecoveredPending(transaction);
+        if (credited) {
+            updateRecoveredPending(transaction.transactionId(), PendingSellStatus.SUCCESS, "recovered after restart");
+            plugin.getLogger().warning("Recovered pending sell " + transaction.transactionId() + " by crediting EMC after restart.");
+        } else {
+            updateRecoveredPending(transaction.transactionId(), PendingSellStatus.FAILED, "recovery credit failed");
+            plugin.getLogger().severe("Failed to recover pending sell " + transaction.transactionId() + "; manual audit required.");
+        }
+    }
+
+    private boolean creditRecoveredPending(PendingSellTransaction transaction) throws AccountStorageException {
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage != null) {
+            return sharedStorage.tryAddBalance(transaction.playerUuid(), transaction.playerName(), transaction.reward(), pluginSettings.maxBalance());
+        }
+        synchronized (this) {
+            AccountSnapshot before = snapshotLocked();
+            try {
+                long current = balances.getOrDefault(transaction.playerUuid(), globalBalances.getOrDefault(transaction.playerUuid(), 0L));
+                long next = AmountUtil.checkedAddBalance(current, transaction.reward(), pluginSettings.maxBalance());
+                names.put(transaction.playerUuid(), transaction.playerName());
+                balances.put(transaction.playerUuid(), next);
+                globalNames.put(transaction.playerUuid(), transaction.playerName());
+                globalBalances.put(transaction.playerUuid(), next);
+                copyLocalToGlobalLocked();
+                saveLocalSnapshotLocked();
+                return true;
+            } catch (ArithmeticException | AccountStorageException exception) {
+                populateLocalStateLocked(before);
+                copyLocalToGlobalLocked();
+                return false;
+            }
+        }
+    }
+
+    private void updateRecoveredPending(String transactionId, PendingSellStatus status, String reason) throws AccountStorageException {
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage != null) {
+            sharedStorage.updatePendingSellStatus(transactionId, status, reason);
+        } else {
+            updateLocalPendingSellStatus(transactionId, status, reason);
+        }
+    }
+
+    private void writePendingSection(YamlConfiguration configuration, PendingSellTransaction transaction) {
+        ConfigurationSection section = configuration.createSection("transactions." + transaction.transactionId());
+        section.set("player-uuid", transaction.playerUuid().toString());
+        section.set("player-name", transaction.playerName());
+        section.set("operation-type", transaction.operationType());
+        ConfigurationSection materials = section.createSection("materials");
+        transaction.materials().forEach(materials::set);
+        section.set("reward", transaction.reward());
+        section.set("status", transaction.status().name());
+        section.set("created-at", transaction.createdAt().toString());
+        section.set("updated-at", transaction.updatedAt().toString());
+        section.set("failure-reason", transaction.failureReason());
+    }
+
+    private YamlConfiguration loadPendingConfiguration() {
+        java.io.File file = pendingTransactionsFile();
+        return file.isFile() ? YamlConfiguration.loadConfiguration(file) : new YamlConfiguration();
+    }
+
+    private void savePendingConfiguration(YamlConfiguration configuration) throws AccountStorageException {
+        java.io.File file = pendingTransactionsFile();
+        java.io.File parent = file.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new AccountStorageException("Failed to create pending transaction directory");
+        }
+        java.io.File temporaryFile = new java.io.File(parent, file.getName() + ".tmp");
+        try {
+            configuration.save(temporaryFile);
+            try {
+                Files.move(temporaryFile.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (IOException ignored) {
+                Files.move(temporaryFile.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException exception) {
+            throw new AccountStorageException("Failed to save pending-transactions.yml", exception);
+        }
+    }
+
+    private java.io.File pendingTransactionsFile() {
+        return new java.io.File(plugin.getDataFolder(), "pending-transactions.yml");
+    }
+
+    private PendingSellStatus parsePendingStatus(String status) {
+        try {
+            return PendingSellStatus.valueOf(status == null ? "" : status);
+        } catch (IllegalArgumentException exception) {
+            return PendingSellStatus.FAILED;
+        }
+    }
+
+    private java.time.Instant parseInstant(String value) {
+        try {
+            return java.time.Instant.parse(value);
+        } catch (RuntimeException exception) {
+            return java.time.Instant.now();
+        }
     }
 
     private String nullToEmpty(String value) {
