@@ -47,6 +47,9 @@ public final class GuiService {
     private record RecommendationEntry(MaterialValue value, String reason) {
     }
 
+    private record PendingBulkSellConfirmation(long reward, Map<Material, Integer> soldMaterials, long expiresAtMillis) {
+    }
+
     private final ServerScheduler scheduler;
     private final MessageService messages;
     private final ValueRegistry valueRegistry;
@@ -57,6 +60,7 @@ public final class GuiService {
     private final Map<UUID, Consumer<Player>> currentOpeners = new HashMap<>();
     private final Map<UUID, MenuView> openViews = new HashMap<>();
     private final Set<UUID> suppressBulkReturn = ConcurrentHashMap.newKeySet();
+    private final Map<UUID, PendingBulkSellConfirmation> pendingBulkConfirmations = new ConcurrentHashMap<>();
 
     private LayoutTemplate mainLayout;
     private LayoutTemplate categoriesLayout;
@@ -159,6 +163,7 @@ public final class GuiService {
         currentOpeners.remove(player.getUniqueId());
         openViews.remove(player.getUniqueId());
         suppressBulkReturn.remove(player.getUniqueId());
+        pendingBulkConfirmations.remove(player.getUniqueId());
     }
 
     public void closeAll() {
@@ -172,6 +177,7 @@ public final class GuiService {
         currentOpeners.clear();
         openViews.clear();
         suppressBulkReturn.clear();
+        pendingBulkConfirmations.clear();
     }
 
     private void openMainInternal(Player player, boolean pushHistory) {
@@ -612,45 +618,38 @@ public final class GuiService {
     private void handleBulkSellClick(Player player, MenuView view) {
         ExchangeService.BulkSellQuote quote = exchangeService.previewBulkSell(view.inventory(), bulkSellLayout.inputSlots());
         if (!quote.success()) {
+            pendingBulkConfirmations.remove(player.getUniqueId());
             messages.send(player, quote.messageKey(), quote.args());
             refreshStatusItems(player, view.inventory(), bulkSellLayout);
             return;
         }
 
         if (quote.reward() >= settings.highValueBulkSellConfirmEmc()) {
-            Material previewMaterial = quote.soldMaterials().keySet().stream().findFirst().orElse(Material.CHEST);
-            List<String> summary = new ArrayList<>();
-            summary.add("&7预计回收 EMC: &a" + quote.reward());
-            summary.add("&7涉及种类: &f" + quote.soldMaterials().size() + " &7种");
-            int totalAmount = quote.soldMaterials().values().stream().mapToInt(Integer::intValue).sum();
-            summary.add("&7总出售数量: &f" + totalAmount);
-            summary.add("");
-            quote.soldMaterials().entrySet().stream()
-                    .sorted(Map.Entry.<Material, Integer>comparingByValue().reversed())
-                    .limit(3)
-                    .forEach(entry -> summary.add("&8- &7" + entry.getKey().name() + " &fx" + entry.getValue()));
-            summary.add("");
-            summary.add("&c这是一次高价值批量出售，请确认后继续。");
-
-            suppressBulkReturn.add(player.getUniqueId());
-            openConfirmMenu(
-                    player,
-                    previewMaterial,
-                    "&a&l批量出售确认",
-                    summary,
-                    confirmed -> {
-                        exchangeService.bulkSell(confirmed, view.inventory(), bulkSellLayout.inputSlots()).thenAccept(result ->
-                                scheduler.runForPlayer(confirmed, () -> {
-                                    messages.send(confirmed, result.messageKey(), result.args());
-                                    openBulkSellInternal(confirmed, false);
-                                })
-                        );
-                    },
-                    cancelled -> reopenExistingView(cancelled, view, reopened -> openBulkSellInternal(reopened, false))
-            );
+            UUID uniqueId = player.getUniqueId();
+            PendingBulkSellConfirmation pending = pendingBulkConfirmations.get(uniqueId);
+            long now = System.currentTimeMillis();
+            if (pending == null
+                    || pending.expiresAtMillis() < now
+                    || pending.reward() != quote.reward()
+                    || !pending.soldMaterials().equals(quote.soldMaterials())) {
+                pendingBulkConfirmations.put(
+                        uniqueId,
+                        new PendingBulkSellConfirmation(quote.reward(), quote.soldMaterials(), now + 15_000L)
+                );
+                messages.send(player, "uemc-bulk-sell-confirm-click", quote.reward());
+                refreshStatusItems(player, view.inventory(), bulkSellLayout);
+                return;
+            }
+            pendingBulkConfirmations.remove(uniqueId);
+            executeBulkSell(player, view);
             return;
         }
 
+        pendingBulkConfirmations.remove(player.getUniqueId());
+        executeBulkSell(player, view);
+    }
+
+    private void executeBulkSell(Player player, MenuView view) {
         exchangeService.bulkSell(player, view.inventory(), bulkSellLayout.inputSlots()).thenAccept(result ->
                 scheduler.runForPlayer(player, () -> {
                     messages.send(player, result.messageKey(), result.args());
@@ -658,6 +657,7 @@ public final class GuiService {
                 })
         );
     }
+
     private void cycleMaterialCategory(Player player, MaterialValue value) {
         List<String> shopIds = shopRegistry.getOrderedShopIdsForAdmin();
         if (shopIds.isEmpty()) {
