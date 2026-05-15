@@ -79,9 +79,13 @@ public final class ItemStackUtil {
     }
 
     public static int countMatching(Inventory inventory, Material material) {
+        return countMatching(inventory, material, true, false);
+    }
+
+    public static int countMatching(Inventory inventory, Material material, boolean strictItemMatch, boolean sellCustomItems) {
         int total = 0;
         for (ItemStack content : inventory.getStorageContents()) {
-            if (content == null || content.getType() != material) {
+            if (!SellableItemMatcher.isPlainSellable(content, material, strictItemMatch, sellCustomItems)) {
                 continue;
             }
             total += content.getAmount();
@@ -90,14 +94,24 @@ public final class ItemStackUtil {
     }
 
     public static boolean removeMatching(Inventory inventory, Material material, int amount) {
-        if (countMatching(inventory, material) < amount) {
+        return removeMatching(inventory, material, amount, true, false);
+    }
+
+    public static boolean removeMatching(
+            Inventory inventory,
+            Material material,
+            int amount,
+            boolean strictItemMatch,
+            boolean sellCustomItems
+    ) {
+        if (countMatching(inventory, material, strictItemMatch, sellCustomItems) < amount) {
             return false;
         }
         int remaining = amount;
         ItemStack[] contents = inventory.getStorageContents();
         for (int i = 0; i < contents.length; i++) {
             ItemStack content = contents[i];
-            if (content == null || content.getType() != material) {
+            if (!SellableItemMatcher.isPlainSellable(content, material, strictItemMatch, sellCustomItems)) {
                 continue;
             }
             int removed = Math.min(content.getAmount(), remaining);

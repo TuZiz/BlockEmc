@@ -2,6 +2,7 @@ package com.blockemc.service.storage;
 
 import java.util.Map;
 import java.util.UUID;
+import com.blockemc.service.audit.TransactionAuditRecord;
 import org.bukkit.Material;
 
 public interface SharedAccountStorage extends AccountStorage {
@@ -12,9 +13,11 @@ public interface SharedAccountStorage extends AccountStorage {
 
     void setBalance(UUID uniqueId, String name, long amount) throws AccountStorageException;
 
-    void addBalance(UUID uniqueId, String name, long amount) throws AccountStorageException;
+    boolean tryAddBalance(UUID uniqueId, String name, long amount, long maxBalance) throws AccountStorageException;
 
-    void takeBalance(UUID uniqueId, String name, long amount) throws AccountStorageException;
+    boolean tryTakeBalance(UUID uniqueId, String name, long amount) throws AccountStorageException;
+
+    long getBalance(UUID uniqueId) throws AccountStorageException;
 
     void setFavorite(UUID uniqueId, String name, Material material, boolean favorite) throws AccountStorageException;
 
@@ -27,6 +30,9 @@ public interface SharedAccountStorage extends AccountStorage {
     ) throws AccountStorageException;
 
     void recordPurchase(UUID uniqueId, String name, Material material, int amount) throws AccountStorageException;
+
+    default void recordAudit(TransactionAuditRecord record) throws AccountStorageException {
+    }
 
     void importFromYamlIfNeeded() throws AccountStorageException;
 }

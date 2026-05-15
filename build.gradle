@@ -1,5 +1,6 @@
 plugins {
     id 'java'
+    id 'com.gradleup.shadow' version '9.4.1'
 }
 
 group = 'com.blockemc'
@@ -10,20 +11,24 @@ repositories {
     maven {
         url = 'https://hub.spigotmc.org/nexus/content/repositories/snapshots/'
     }
-}
-
-configurations {
-    shaded
+    maven {
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
 }
 
 dependencies {
     compileOnly 'org.spigotmc:spigot-api:26.1.2-R0.1-SNAPSHOT'
-    shaded 'com.mysql:mysql-connector-j:8.4.0'
+    implementation 'com.mysql:mysql-connector-j:8.4.0'
+    implementation 'com.zaxxer:HikariCP:5.1.0'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter:5.11.4'
+    testImplementation 'org.mockbukkit.mockbukkit:mockbukkit-v1.21:4.0.0'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(25)
+        languageVersion = JavaLanguageVersion.of(21)
     }
 }
 
@@ -32,11 +37,24 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 tasks.named('jar') {
+    enabled = false
+}
+
+tasks.named('shadowJar') {
+    archiveClassifier.set('')
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
-    from({
-        configurations.shaded.collect { it.isDirectory() ? it : zipTree(it) }
-    })
+    mergeServiceFiles()
+    relocate 'com.mysql', 'com.blockemc.libs.mysql'
+    relocate 'com.zaxxer.hikari', 'com.blockemc.libs.hikari'
     exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA'
+}
+
+tasks.named('build') {
+    dependsOn tasks.named('shadowJar')
+}
+
+test {
+    useJUnitPlatform()
 }
 
 processResources {

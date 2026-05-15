@@ -8,7 +8,9 @@ import com.blockemc.model.ExchangeMode;
 import com.blockemc.model.ShopDefinition;
 import com.blockemc.service.AccountService;
 import com.blockemc.service.GuiService;
+import com.blockemc.service.audit.TransactionAuditRecord;
 import com.blockemc.service.ShopAuditService;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -129,7 +131,7 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
                 messages.sendRaw(sender, "&c控制台请使用 /uemc balance <玩家名>。");
                 return true;
             }
-            messages.send(sender, "uemc-balance", accountService.getBalance(player.getUniqueId()));
+            messages.send(sender, "uemc-balance", accountService.getCachedBalance(player.getUniqueId()));
             return true;
         }
         Player target = Bukkit.getPlayerExact(args[1]);
@@ -137,7 +139,7 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
             messages.send(sender, "uemc-player-not-found", args[1]);
             return true;
         }
-        messages.send(sender, "uemc-balance", accountService.getBalance(target.getUniqueId()));
+        messages.send(sender, "uemc-balance", accountService.getCachedBalance(target.getUniqueId()));
         return true;
     }
 
@@ -226,7 +228,7 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
         }
 
         long price = parsePositiveLong(args[1], -1L);
-        if (price < 0L) {
+        if (price <= 0L) {
             messages.send(sender, "uemc-admin-invalid-price");
             return true;
         }
@@ -238,7 +240,12 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
         }
 
         ExchangeMode mode = args.length > 2 ? ExchangeMode.fromConfig(args[2]) : ExchangeMode.BOTH;
-        valueRegistry.set(hand.getType(), price, mode);
+        try {
+            valueRegistry.set(hand.getType(), price, mode);
+        } catch (IllegalArgumentException exception) {
+            messages.send(sender, "uemc-admin-invalid-price");
+            return true;
+        }
         if (!isInConfiguredShop(hand.getType())) {
             valueRegistry.addTemporaryMaterial(hand.getType());
         }
@@ -292,16 +299,33 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
 
         switch (action) {
             case "give" -> {
-                long current = accountService.addBalance(target.getUniqueId(), target.getName(), amount);
-                messages.send(sender, "uemc-admin-add-player", target.getName(), amount, current);
+                long before = accountService.getCachedBalance(target.getUniqueId());
+                accountService.tryAddBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
+                    auditAdmin(target, "ADMIN_GIVE", amount, before, success, success ? "" : "balance limit");
+                    if (success) {
+                        messages.send(sender, "uemc-admin-add-player", target.getName(), amount, accountService.getCachedBalance(target.getUniqueId()));
+                    } else {
+                        messages.send(sender, "uemc-amount-too-large");
+                    }
+                });
             }
             case "set" -> {
-                accountService.setBalance(target.getUniqueId(), target.getName(), amount);
-                messages.send(sender, "uemc-admin-set-player", target.getName(), amount);
+                long before = accountService.getCachedBalance(target.getUniqueId());
+                accountService.setBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
+                    auditAdmin(target, "ADMIN_SET", amount, before, success, "");
+                    messages.send(sender, "uemc-admin-set-player", target.getName(), accountService.getCachedBalance(target.getUniqueId()));
+                });
             }
             case "take" -> {
-                long current = accountService.takeBalance(target.getUniqueId(), target.getName(), amount);
-                messages.send(sender, "uemc-admin-take-player", target.getName(), amount, current);
+                long before = accountService.getCachedBalance(target.getUniqueId());
+                accountService.tryTakeBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
+                    auditAdmin(target, "ADMIN_TAKE", amount, before, success, success ? "" : "insufficient balance");
+                    if (success) {
+                        messages.send(sender, "uemc-admin-take-player", target.getName(), amount, accountService.getCachedBalance(target.getUniqueId()));
+                    } else {
+                        messages.send(sender, "uemc-emc-not-enough", amount);
+                    }
+                });
             }
             default -> {
                 return false;
@@ -317,6 +341,26 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
             }
         }
         return false;
+    }
+
+    private void auditAdmin(Player target, String operation, long amount, long before, boolean success, String reason) {
+        accountService.recordAudit(new TransactionAuditRecord(
+                java.util.UUID.randomUUID().toString(),
+                target.getUniqueId(),
+                target.getName(),
+                operation,
+                null,
+                0,
+                amount,
+                amount,
+                before,
+                accountService.getCachedBalance(target.getUniqueId()),
+                accountService.getStorageDescription(),
+                success,
+                reason,
+                Instant.now(),
+                plugin.getServer().getName()
+        ));
     }
 
     private long parsePositiveLong(String value, long fallback) {

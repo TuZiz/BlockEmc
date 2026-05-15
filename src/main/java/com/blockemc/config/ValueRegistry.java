@@ -2,6 +2,7 @@ package com.blockemc.config;
 
 import com.blockemc.model.ExchangeMode;
 import com.blockemc.model.MaterialValue;
+import com.blockemc.model.PluginSettings;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
@@ -28,11 +29,17 @@ public final class ValueRegistry {
     private final Set<Material> temporaryMaterials = EnumSet.noneOf(Material.class);
     private final Set<Material> hiddenMaterials = EnumSet.noneOf(Material.class);
     private final Map<Material, String> categoryOverrides = new LinkedHashMap<>();
+    private PluginSettings settings;
 
-    public ValueRegistry(JavaPlugin plugin) {
+    public ValueRegistry(JavaPlugin plugin, PluginSettings settings) {
         this.plugin = plugin;
+        this.settings = settings;
         this.valuesFile = new File(plugin.getDataFolder(), "values.yml");
         this.temporaryFile = new File(plugin.getDataFolder(), "temporary-materials.yml");
+    }
+
+    public void updateSettings(PluginSettings settings) {
+        this.settings = settings;
     }
 
     public void reload() {
@@ -51,7 +58,16 @@ public final class ValueRegistry {
                     plugin.getLogger().warning("跳过未知材质: " + key);
                     continue;
                 }
-                long emc = Math.max(1L, valueSection.getLong(key));
+                long emc = valueSection.getLong(key);
+                if (emc <= 0L) {
+                    plugin.getLogger().warning("Skipping non-positive EMC value for material " + material.name() + ": " + emc);
+                    continue;
+                }
+                if (settings != null && emc > settings.maxSinglePrice()) {
+                    plugin.getLogger().warning("Skipping material " + material.name() + " because EMC value " + emc
+                            + " exceeds limits.max-single-price=" + settings.maxSinglePrice());
+                    continue;
+                }
                 ExchangeMode mode = modeSection == null
                         ? ExchangeMode.BOTH
                         : ExchangeMode.fromConfig(modeSection.getString(key));
@@ -121,7 +137,13 @@ public final class ValueRegistry {
     }
 
     public synchronized void set(Material material, long emc, ExchangeMode mode) {
-        values.put(material, new MaterialValue(material, Math.max(1L, emc), mode));
+        if (emc <= 0L) {
+            throw new IllegalArgumentException("EMC price must be greater than zero");
+        }
+        if (settings != null && emc > settings.maxSinglePrice()) {
+            throw new IllegalArgumentException("EMC price exceeds limits.max-single-price");
+        }
+        values.put(material, new MaterialValue(material, emc, mode));
         saveValues();
     }
 

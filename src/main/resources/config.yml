@@ -1,16 +1,30 @@
-# BlockEmc 全局配置
+# BlockEmc global configuration
 
 exchange:
-  # 批量出售返还比例，最终收益 = EMC * 数量 * 比例
+  # Bulk sell return rate. Final reward = EMC * amount * recycle-rate.
   recycle-rate: 0.75
-  # 快捷购买与全买时的单次上限
+  # Legacy quick-buy cap. The effective cap is also limited by limits.max-transaction-amount.
   max-single-trade: 64
 
 confirm:
-  # 达到该消耗时，购买前弹出确认 GUI
+  # Open confirmation GUI when a buy costs at least this amount.
   high-value-buy-emc: 4096
-  # 达到该收益时，批量出售前弹出确认 GUI
+  # Open confirmation GUI when a bulk sale returns at least this amount.
   high-value-bulk-sell-emc: 4096
+
+security:
+  # Keep false unless you intentionally want named/lored/enchant/PDC/custom model items to be sellable.
+  sell-custom-items: false
+  # Strict matching protects task, menu, NBT/PDC, damaged, enchanted and custom model items.
+  strict-item-match: true
+
+limits:
+  # Values above this are skipped while loading values.yml and cannot be added by command.
+  max-single-price: 1000000000000
+  # Maximum item count in one buy/sell transaction.
+  max-transaction-amount: 2304
+  # Account balances cannot exceed this value.
+  max-balance: 900000000000000000
 
 storage:
   # Supported values: YAML, MYSQL
@@ -19,9 +33,16 @@ storage:
     host: 127.0.0.1
     port: 3306
     database: blockemc
-    username: root
-    password: "186345"
-    use-ssl: false
+    username: blockemc
+    password: "CHANGE_ME"
+    use-ssl: true
+    allow-public-key-retrieval: false
     table-prefix: blockemc_
     import-from-yaml-on-first-run: true
     refresh-seconds: 30
+    pool:
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout-ms: 10000
+      idle-timeout-ms: 600000
+      max-lifetime-ms: 1800000

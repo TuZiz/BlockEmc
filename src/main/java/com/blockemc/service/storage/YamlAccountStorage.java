@@ -2,6 +2,8 @@ package com.blockemc.service.storage;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -95,8 +97,19 @@ public final class YamlAccountStorage implements AccountStorage {
             throw new AccountStorageException("Failed to create plugin data directory for accounts.yml");
         }
 
+        File temporaryFile = new File(parent == null ? accountsFile.getParentFile() : parent, accountsFile.getName() + ".tmp");
         try {
-            configuration.save(accountsFile);
+            configuration.save(temporaryFile);
+            try {
+                Files.move(
+                        temporaryFile.toPath(),
+                        accountsFile.toPath(),
+                        StandardCopyOption.REPLACE_EXISTING,
+                        StandardCopyOption.ATOMIC_MOVE
+                );
+            } catch (IOException atomicMoveFailure) {
+                Files.move(temporaryFile.toPath(), accountsFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException exception) {
             throw new AccountStorageException("Failed to save accounts.yml", exception);
         }

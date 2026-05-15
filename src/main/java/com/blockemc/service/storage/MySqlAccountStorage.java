@@ -1,11 +1,13 @@
 package com.blockemc.service.storage;
 
 import com.blockemc.model.StorageSettings;
+import com.blockemc.service.audit.TransactionAuditRecord;
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -43,6 +45,8 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
     private final String dailySalesTable;
     private final String dailySaleMaterialsTable;
     private final String purchaseHeatTable;
+    private final String auditTable;
+    private final HikariDataSource dataSource;
 
     public MySqlAccountStorage(
             JavaPlugin plugin,
@@ -58,11 +62,13 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
         this.dailySalesTable = settings.tablePrefix() + "daily_sales";
         this.dailySaleMaterialsTable = settings.tablePrefix() + "daily_sale_materials";
         this.purchaseHeatTable = settings.tablePrefix() + "purchase_heat";
+        this.auditTable = settings.tablePrefix() + "audit_log";
         validateSettings();
-        ensureDriverLoaded();
+        this.dataSource = createDataSource();
         try (Connection connection = openConnection()) {
             initializeSchema(connection);
         } catch (SQLException exception) {
+            dataSource.close();
             throw new AccountStorageException("Failed to initialize MySQL schema", exception);
         }
     }
@@ -123,18 +129,20 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
     }
 
     @Override
-    public void addBalance(UUID uniqueId, String name, long amount) throws AccountStorageException {
-        if (amount <= 0L) {
-            return;
+    public boolean tryAddBalance(UUID uniqueId, String name, long amount, long maxBalance) throws AccountStorageException {
+        if (amount <= 0L || amount > maxBalance) {
+            return false;
         }
         try (Connection connection = openConnection()) {
-            String sql = "INSERT INTO " + quoted(accountsTable) + " (player_uuid, player_name, balance) VALUES (?, ?, ?) "
-                    + "ON DUPLICATE KEY UPDATE player_name = VALUES(player_name), balance = balance + VALUES(balance)";
+            ensureAccountRow(connection, uniqueId, name);
+            String sql = "UPDATE " + quoted(accountsTable)
+                    + " SET player_name = ?, balance = balance + ? WHERE player_uuid = ? AND balance <= ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
-                statement.setString(1, uniqueId.toString());
-                statement.setString(2, normalizeName(uniqueId, name));
-                statement.setLong(3, amount);
-                statement.executeUpdate();
+                statement.setString(1, normalizeName(uniqueId, name));
+                statement.setLong(2, amount);
+                statement.setString(3, uniqueId.toString());
+                statement.setLong(4, Math.max(0L, maxBalance - amount));
+                return statement.executeUpdate() == 1;
             }
         } catch (SQLException exception) {
             throw new AccountStorageException("Failed to increment MySQL account balance", exception);
@@ -142,22 +150,38 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
     }
 
     @Override
-    public void takeBalance(UUID uniqueId, String name, long amount) throws AccountStorageException {
+    public boolean tryTakeBalance(UUID uniqueId, String name, long amount) throws AccountStorageException {
         if (amount <= 0L) {
-            return;
+            return false;
         }
         try (Connection connection = openConnection()) {
             ensureAccountRow(connection, uniqueId, name);
             String sql = "UPDATE " + quoted(accountsTable)
-                    + " SET player_name = ?, balance = GREATEST(0, balance - ?) WHERE player_uuid = ?";
+                    + " SET player_name = ?, balance = balance - ? WHERE player_uuid = ? AND balance >= ?";
             try (PreparedStatement statement = connection.prepareStatement(sql)) {
                 statement.setString(1, normalizeName(uniqueId, name));
                 statement.setLong(2, amount);
                 statement.setString(3, uniqueId.toString());
-                statement.executeUpdate();
+                statement.setLong(4, amount);
+                return statement.executeUpdate() == 1;
             }
         } catch (SQLException exception) {
             throw new AccountStorageException("Failed to decrement MySQL account balance", exception);
+        }
+    }
+
+    @Override
+    public long getBalance(UUID uniqueId) throws AccountStorageException {
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(
+                     "SELECT balance FROM " + quoted(accountsTable) + " WHERE player_uuid = ?"
+             )) {
+            statement.setString(1, uniqueId.toString());
+            try (ResultSet resultSet = statement.executeQuery()) {
+                return resultSet.next() ? Math.max(0L, resultSet.getLong("balance")) : 0L;
+            }
+        } catch (SQLException exception) {
+            throw new AccountStorageException("Failed to read MySQL account balance", exception);
         }
     }
 
@@ -245,6 +269,35 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
     }
 
     @Override
+    public void recordAudit(TransactionAuditRecord record) throws AccountStorageException {
+        String sql = "INSERT INTO " + quoted(auditTable) + " ("
+                + "transaction_id, player_uuid, player_name, operation_type, material, amount, unit_price, total_price, "
+                + "before_balance, after_balance, storage_type, success, failure_reason, event_time, server_name"
+                + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        try (Connection connection = openConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, record.transactionId());
+            statement.setString(2, record.playerUuid() == null ? "" : record.playerUuid().toString());
+            statement.setString(3, record.playerName());
+            statement.setString(4, record.operationType());
+            statement.setString(5, record.material() == null ? "" : record.material().name());
+            statement.setInt(6, record.amount());
+            statement.setLong(7, record.unitPrice());
+            statement.setLong(8, record.totalPrice());
+            statement.setLong(9, record.beforeBalance());
+            statement.setLong(10, record.afterBalance());
+            statement.setString(11, record.storageType());
+            statement.setBoolean(12, record.success());
+            statement.setString(13, record.failureReason());
+            statement.setString(14, record.timestamp().toString());
+            statement.setString(15, record.serverName());
+            statement.executeUpdate();
+        } catch (SQLException exception) {
+            throw new AccountStorageException("Failed to write MySQL audit log", exception);
+        }
+    }
+
+    @Override
     public void importFromYamlIfNeeded() throws AccountStorageException {
         if (!settings.importFromYamlOnFirstRun() || hasImportMarker() || !migrationSource.exists()) {
             return;
@@ -282,18 +335,47 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
         if (settings.username().isBlank()) {
             throw new AccountStorageException("MySQL username cannot be empty");
         }
+        warnIfInsecureSettings();
     }
 
-    private void ensureDriverLoaded() throws AccountStorageException {
-        try {
-            Class.forName("com.mysql.cj.jdbc.Driver");
-        } catch (ClassNotFoundException exception) {
-            throw new AccountStorageException("MySQL JDBC driver is missing from the plugin jar", exception);
+    private HikariDataSource createDataSource() {
+        HikariConfig config = new HikariConfig();
+        config.setJdbcUrl(settings.jdbcUrl());
+        config.setUsername(settings.username());
+        config.setPassword(settings.password());
+        config.setDriverClassName("com.mysql.cj.jdbc.Driver");
+        config.setPoolName("BlockEmc-MySQL");
+        config.setMaximumPoolSize(settings.pool().maximumPoolSize());
+        config.setMinimumIdle(settings.pool().minimumIdle());
+        config.setConnectionTimeout(settings.pool().connectionTimeoutMs());
+        config.setIdleTimeout(settings.pool().idleTimeoutMs());
+        config.setMaxLifetime(settings.pool().maxLifetimeMs());
+        config.setInitializationFailTimeout(-1L);
+        return new HikariDataSource(config);
+    }
+
+    @Override
+    public void close() {
+        dataSource.close();
+    }
+
+    private void warnIfInsecureSettings() throws AccountStorageException {
+        if ("root".equalsIgnoreCase(settings.username())) {
+            plugin.getLogger().warning("MySQL username is root; use a dedicated least-privilege database user.");
+        }
+        if (settings.password().isBlank() || "CHANGE_ME".equals(settings.password())) {
+            throw new AccountStorageException("MySQL password is empty or unchanged; refusing to connect.");
+        }
+        if (!settings.useSsl()) {
+            plugin.getLogger().warning("MySQL use-ssl is false; enable TLS for production servers.");
+        }
+        if (settings.allowPublicKeyRetrieval()) {
+            plugin.getLogger().warning("MySQL allow-public-key-retrieval is true; disable it unless strictly required.");
         }
     }
 
     private Connection openConnection() throws SQLException {
-        return DriverManager.getConnection(settings.jdbcUrl(), settings.username(), settings.password());
+        return dataSource.getConnection();
     }
 
     private void initializeSchema(Connection connection) throws SQLException {
@@ -334,6 +416,25 @@ public final class MySqlAccountStorage implements SharedAccountStorage {
                         purchases INT NOT NULL
                     )
                     """.formatted(quoted(purchaseHeatTable)));
+            statement.executeUpdate("""
+                    CREATE TABLE IF NOT EXISTS %s (
+                        transaction_id VARCHAR(64) NOT NULL PRIMARY KEY,
+                        player_uuid CHAR(36) NOT NULL,
+                        player_name VARCHAR(32) NOT NULL,
+                        operation_type VARCHAR(32) NOT NULL,
+                        material VARCHAR(64) NOT NULL,
+                        amount INT NOT NULL,
+                        unit_price BIGINT NOT NULL,
+                        total_price BIGINT NOT NULL,
+                        before_balance BIGINT NOT NULL,
+                        after_balance BIGINT NOT NULL,
+                        storage_type VARCHAR(32) NOT NULL,
+                        success BOOLEAN NOT NULL,
+                        failure_reason VARCHAR(255) NOT NULL,
+                        event_time VARCHAR(64) NOT NULL,
+                        server_name VARCHAR(64) NOT NULL
+                    )
+                    """.formatted(quoted(auditTable)));
         }
     }
 

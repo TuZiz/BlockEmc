@@ -1,17 +1,26 @@
 package com.blockemc.service;
 
+import com.blockemc.compat.SchedulerAdapter;
 import com.blockemc.config.ValueRegistry;
 import com.blockemc.model.MaterialValue;
 import com.blockemc.model.PluginSettings;
 import com.blockemc.model.TradeResult;
+import com.blockemc.service.audit.TransactionAuditRecord;
+import com.blockemc.util.AmountUtil;
 import com.blockemc.util.ItemStackUtil;
+import com.blockemc.util.SellableItemMatcher;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.time.Instant;
+import java.util.concurrent.CompletableFuture;
+import java.util.logging.Level;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.java.JavaPlugin;
 
 public final class ExchangeService {
 
@@ -38,11 +47,21 @@ public final class ExchangeService {
     private PluginSettings settings;
     private final ValueRegistry valueRegistry;
     private final AccountService accountService;
+    private final SchedulerAdapter scheduler;
+    private final JavaPlugin plugin;
 
-    public ExchangeService(PluginSettings settings, ValueRegistry valueRegistry, AccountService accountService) {
+    public ExchangeService(
+            JavaPlugin plugin,
+            PluginSettings settings,
+            ValueRegistry valueRegistry,
+            AccountService accountService,
+            SchedulerAdapter scheduler
+    ) {
+        this.plugin = plugin;
         this.settings = settings;
         this.valueRegistry = valueRegistry;
         this.accountService = accountService;
+        this.scheduler = scheduler;
     }
 
     public void updateSettings(PluginSettings settings) {
@@ -59,8 +78,18 @@ public final class ExchangeService {
         }
 
         int safeAmount = Math.max(1, Math.min(amount, settings.maxSingleTrade()));
-        long cost = value.emc() * safeAmount;
-        if (accountService.getBalance(player.getUniqueId()) < cost) {
+        long cost;
+        try {
+            cost = AmountUtil.checkedPurchaseCost(
+                    value.emc(),
+                    safeAmount,
+                    settings.maxSinglePrice(),
+                    settings.maxTransactionAmount()
+            );
+        } catch (ArithmeticException exception) {
+            return BuyQuote.failure("uemc-amount-too-large");
+        }
+        if (accountService.getCachedBalance(player.getUniqueId()) < cost) {
             return BuyQuote.failure("uemc-emc-not-enough", cost);
         }
 
@@ -81,7 +110,7 @@ public final class ExchangeService {
         }
 
         int desired = Math.min(Math.max(1, cap), settings.maxSingleTrade());
-        int balanceLimited = (int) Math.min(Integer.MAX_VALUE, accountService.getBalance(player.getUniqueId()) / Math.max(1L, value.emc()));
+        int balanceLimited = (int) Math.min(Integer.MAX_VALUE, accountService.getCachedBalance(player.getUniqueId()) / value.emc());
         if (balanceLimited <= 0) {
             return BuyQuote.failure("uemc-emc-not-enough", value.emc());
         }
@@ -92,53 +121,88 @@ public final class ExchangeService {
         }
 
         int amount = Math.min(desired, Math.min(balanceLimited, inventoryLimited));
-        return BuyQuote.success(material, amount, value.emc() * amount);
+        try {
+            return BuyQuote.success(
+                    material,
+                    amount,
+                    AmountUtil.checkedPurchaseCost(value.emc(), amount, settings.maxSinglePrice(), settings.maxTransactionAmount())
+            );
+        } catch (ArithmeticException exception) {
+            return BuyQuote.failure("uemc-amount-too-large");
+        }
     }
 
-    public TradeResult buy(Player player, Material material, int amount) {
+    public CompletableFuture<TradeResult> buy(Player player, Material material, int amount) {
         BuyQuote quote = quoteBuy(player, material, amount);
         if (!quote.success()) {
-            return TradeResult.failure(quote.messageKey(), quote.args());
+            return CompletableFuture.completedFuture(TradeResult.failure(quote.messageKey(), quote.args()));
         }
 
-        accountService.takeBalance(player.getUniqueId(), player.getName(), quote.cost());
-        player.getInventory().addItem(new ItemStack(material, quote.amount()));
-        accountService.recordPurchase(player.getUniqueId(), player.getName(), material, quote.amount());
-        return TradeResult.success("uemc-buy-success", quote.cost());
+        return accountService.tryTakeBalance(player.getUniqueId(), player.getName(), quote.cost()).thenCompose(taken -> {
+            if (!taken) {
+                return CompletableFuture.completedFuture(TradeResult.failure("uemc-emc-not-enough", quote.cost()));
+            }
+            CompletableFuture<TradeResult> result = new CompletableFuture<>();
+            scheduler.runForPlayer(player, () -> finishPurchasedItemDelivery(player, quote, result));
+            return result;
+        }).exceptionally(exception -> {
+            plugin.getLogger().log(Level.WARNING, "Purchase failed before item delivery for " + player.getUniqueId(), exception);
+            return TradeResult.failure("uemc-trade-storage-failed");
+        });
     }
 
-    public TradeResult buyMaximum(Player player, Material material, int cap) {
+    public CompletableFuture<TradeResult> buyMaximum(Player player, Material material, int cap) {
         BuyQuote quote = quoteBuyMaximum(player, material, cap);
         if (!quote.success()) {
-            return TradeResult.failure(quote.messageKey(), quote.args());
+            return CompletableFuture.completedFuture(TradeResult.failure(quote.messageKey(), quote.args()));
         }
         return buy(player, material, quote.amount());
     }
 
-    public TradeResult sell(Player player, Material material, int amount) {
+    public CompletableFuture<TradeResult> sell(Player player, Material material, int amount) {
         MaterialValue value = valueRegistry.get(material).orElse(null);
         if (value == null) {
-            return TradeResult.failure("uemc-material-not-supported");
+            return CompletableFuture.completedFuture(TradeResult.failure("uemc-material-not-supported"));
         }
         if (!value.mode().canSell()) {
-            return TradeResult.failure("uemc-sell-disabled-buy-only");
+            return CompletableFuture.completedFuture(TradeResult.failure("uemc-sell-disabled-buy-only"));
         }
 
         int safeAmount = Math.max(1, amount);
-        if (!ItemStackUtil.removeMatching(player.getInventory(), material, safeAmount)) {
-            return TradeResult.failure("uemc-item-not-enough-sell");
+        long reward;
+        try {
+            AmountUtil.validateAmount(safeAmount, settings.maxTransactionAmount());
+            reward = calculateSellEmc(value.emc(), safeAmount);
+        } catch (ArithmeticException exception) {
+            return CompletableFuture.completedFuture(TradeResult.failure("uemc-amount-too-large"));
         }
-
-        long reward = calculateSellEmc(value.emc(), safeAmount);
-        accountService.addBalance(player.getUniqueId(), player.getName(), reward);
-        accountService.recordSale(player.getUniqueId(), player.getName(), Map.of(material, safeAmount), reward);
-        return TradeResult.success("uemc-sell-success", reward);
+        if (reward <= 0L) {
+            return CompletableFuture.completedFuture(TradeResult.failure("uemc-sell-zero-value"));
+        }
+        if (!ItemStackUtil.removeMatching(player.getInventory(), material, safeAmount, settings.strictItemMatch(), settings.sellCustomItems())) {
+            return CompletableFuture.completedFuture(TradeResult.failure("uemc-item-not-enough-sell"));
+        }
+        return accountService.tryAddBalance(player.getUniqueId(), player.getName(), reward).thenApply(added -> {
+            if (!added) {
+                scheduler.runForPlayer(player, () -> ItemStackUtil.giveOrDrop(player, new ItemStack(material, safeAmount)));
+                audit(player, "SELL", material, safeAmount, value.emc(), reward, false, "balance add rejected");
+                return TradeResult.failure("uemc-trade-storage-failed");
+            }
+            accountService.recordSale(player.getUniqueId(), player.getName(), Map.of(material, safeAmount), reward);
+            audit(player, "SELL", material, safeAmount, value.emc(), reward, true, "");
+            return TradeResult.success("uemc-sell-success", reward);
+        }).exceptionally(exception -> {
+            scheduler.runForPlayer(player, () -> ItemStackUtil.giveOrDrop(player, new ItemStack(material, safeAmount)));
+            plugin.getLogger().log(Level.WARNING, "Sale balance update failed for " + player.getUniqueId(), exception);
+            audit(player, "SELL", material, safeAmount, value.emc(), reward, false, exception.getMessage());
+            return TradeResult.failure("uemc-trade-storage-failed");
+        });
     }
 
-    public TradeResult sellAll(Player player, Material material) {
-        int total = ItemStackUtil.countMatching(player.getInventory(), material);
+    public CompletableFuture<TradeResult> sellAll(Player player, Material material) {
+        int total = ItemStackUtil.countMatching(player.getInventory(), material, settings.strictItemMatch(), settings.sellCustomItems());
         if (total <= 0) {
-            return TradeResult.failure("uemc-item-not-enough-sell");
+            return CompletableFuture.completedFuture(TradeResult.failure("uemc-item-not-enough-sell"));
         }
         return sell(player, material, total);
     }
@@ -158,39 +222,62 @@ public final class ExchangeService {
 
             MaterialValue value = valueRegistry.get(stack.getType()).orElseThrow();
             soldMaterials.merge(stack.getType(), stack.getAmount(), Integer::sum);
-            totalReward += calculateSellEmc(value.emc(), stack.getAmount());
+            try {
+                totalReward = Math.addExact(totalReward, calculateSellEmc(value.emc(), stack.getAmount()));
+            } catch (ArithmeticException exception) {
+                return BulkSellQuote.failure("uemc-amount-too-large");
+            }
         }
 
-        if (soldMaterials.isEmpty()) {
+        if (soldMaterials.isEmpty() || totalReward <= 0L) {
             return BulkSellQuote.failure("uemc-no-sellable-items");
         }
         return BulkSellQuote.success(totalReward, soldMaterials);
     }
 
-    public TradeResult bulkSell(Player player, Inventory inventory, Collection<Integer> inputSlots) {
+    public CompletableFuture<TradeResult> bulkSell(Player player, Inventory inventory, Collection<Integer> inputSlots) {
         BulkSellQuote quote = previewBulkSell(inventory, inputSlots);
         if (!quote.success()) {
-            return TradeResult.failure(quote.messageKey(), quote.args());
+            return CompletableFuture.completedFuture(TradeResult.failure(quote.messageKey(), quote.args()));
         }
 
+        Map<Integer, ItemStack> removedItems = new HashMap<>();
         for (int slot : inputSlots) {
             ItemStack stack = inventory.getItem(slot);
             if (stack == null || stack.getType() == Material.AIR) {
                 continue;
             }
             if (isSellable(stack)) {
+                removedItems.put(slot, stack.clone());
                 inventory.setItem(slot, null);
             }
         }
 
-        accountService.addBalance(player.getUniqueId(), player.getName(), quote.reward());
-        accountService.recordSale(player.getUniqueId(), player.getName(), quote.soldMaterials(), quote.reward());
-        return TradeResult.success("uemc-batch-sell-success", quote.reward());
+        return accountService.tryAddBalance(player.getUniqueId(), player.getName(), quote.reward()).thenApply(added -> {
+            if (!added) {
+                scheduler.runForPlayer(player, () -> restoreBulkItems(player, inventory, removedItems));
+                audit(player, "BULK_SELL", null, quote.soldMaterials().values().stream().mapToInt(Integer::intValue).sum(), 0L, quote.reward(), false, "balance add rejected");
+                return TradeResult.failure("uemc-trade-storage-failed");
+            }
+            accountService.recordSale(player.getUniqueId(), player.getName(), quote.soldMaterials(), quote.reward());
+            audit(player, "BULK_SELL", null, quote.soldMaterials().values().stream().mapToInt(Integer::intValue).sum(), 0L, quote.reward(), true, "");
+            return TradeResult.success("uemc-batch-sell-success", quote.reward());
+        }).exceptionally(exception -> {
+            scheduler.runForPlayer(player, () -> restoreBulkItems(player, inventory, removedItems));
+            plugin.getLogger().log(Level.WARNING, "Bulk sale balance update failed for " + player.getUniqueId(), exception);
+            audit(player, "BULK_SELL", null, quote.soldMaterials().values().stream().mapToInt(Integer::intValue).sum(), 0L, quote.reward(), false, exception.getMessage());
+            return TradeResult.failure("uemc-trade-storage-failed");
+        });
     }
 
     public long calculateSellEmc(long emc, int amount) {
-        long calculated = Math.round(emc * amount * settings.recycleRate());
-        return Math.max(1L, calculated);
+        return AmountUtil.checkedSellReward(
+                emc,
+                amount,
+                settings.recycleRate(),
+                settings.maxSinglePrice(),
+                settings.maxTransactionAmount()
+        );
     }
 
     public boolean isSellable(ItemStack itemStack) {
@@ -198,6 +285,110 @@ public final class ExchangeService {
             return false;
         }
         MaterialValue value = valueRegistry.get(itemStack.getType()).orElse(null);
-        return value != null && value.mode().canSell();
+        return value != null
+                && value.mode().canSell()
+                && SellableItemMatcher.isPlainSellable(
+                        itemStack,
+                        itemStack.getType(),
+                        settings.strictItemMatch(),
+                        settings.sellCustomItems()
+                );
+    }
+
+    private void finishPurchasedItemDelivery(Player player, BuyQuote quote, CompletableFuture<TradeResult> result) {
+        try {
+            ItemStack stack = new ItemStack(quote.material(), quote.amount());
+            if (!ItemStackUtil.canFit(player.getInventory(), stack)) {
+                compensatePurchase(player, quote.cost(), "inventory changed before delivery");
+                audit(player, "BUY", quote.material(), quote.amount(), unitPrice(quote), quote.cost(), false, "inventory full");
+                result.complete(TradeResult.failure("uemc-inventory-full"));
+                return;
+            }
+            Map<Integer, ItemStack> leftovers = player.getInventory().addItem(stack);
+            if (!leftovers.isEmpty()) {
+                compensatePurchase(player, quote.cost(), "inventory addItem returned leftovers");
+                audit(player, "BUY", quote.material(), quote.amount(), unitPrice(quote), quote.cost(), false, "inventory leftovers");
+                result.complete(TradeResult.failure("uemc-inventory-full"));
+                return;
+            }
+            accountService.recordPurchase(player.getUniqueId(), player.getName(), quote.material(), quote.amount());
+            audit(player, "BUY", quote.material(), quote.amount(), unitPrice(quote), quote.cost(), true, "");
+            result.complete(TradeResult.success("uemc-buy-success", quote.cost()));
+        } catch (RuntimeException exception) {
+            compensatePurchase(player, quote.cost(), exception.getMessage());
+            audit(player, "BUY", quote.material(), quote.amount(), unitPrice(quote), quote.cost(), false, exception.getMessage());
+            result.complete(TradeResult.failure("uemc-trade-storage-failed"));
+        }
+    }
+
+    private void compensatePurchase(Player player, long cost, String reason) {
+        accountService.tryAddBalance(player.getUniqueId(), player.getName(), cost).thenAccept(refunded -> {
+            if (!refunded) {
+                plugin.getLogger().severe("Failed to compensate purchase for " + player.getUniqueId() + ": " + reason);
+            }
+        }).exceptionally(exception -> {
+            plugin.getLogger().log(Level.SEVERE, "Failed to compensate purchase for " + player.getUniqueId() + ": " + reason, exception);
+            return null;
+        });
+    }
+
+    private void restoreBulkItems(Player player, Inventory inventory, Map<Integer, ItemStack> removedItems) {
+        for (Map.Entry<Integer, ItemStack> entry : removedItems.entrySet()) {
+            if (inventory.getItem(entry.getKey()) == null) {
+                inventory.setItem(entry.getKey(), entry.getValue());
+            } else {
+                ItemStackUtil.giveOrDrop(player, entry.getValue());
+            }
+        }
+    }
+
+    private void audit(
+            Player player,
+            String operation,
+            Material material,
+            int amount,
+            long unitPrice,
+            long totalPrice,
+            boolean success,
+            String failureReason
+    ) {
+        long afterBalance = accountService.getCachedBalance(player.getUniqueId());
+        long beforeBalance = afterBalance;
+        if (success) {
+            if ("BUY".equals(operation)) {
+                beforeBalance = safeAdd(afterBalance, totalPrice);
+            } else if (operation.contains("SELL")) {
+                beforeBalance = Math.max(0L, afterBalance - totalPrice);
+            }
+        }
+        accountService.recordAudit(new TransactionAuditRecord(
+                java.util.UUID.randomUUID().toString(),
+                player.getUniqueId(),
+                player.getName(),
+                operation,
+                material,
+                amount,
+                unitPrice,
+                totalPrice,
+                beforeBalance,
+                afterBalance,
+                accountService.getStorageDescription(),
+                success,
+                failureReason == null ? "" : failureReason,
+                Instant.now(),
+                plugin.getServer().getName()
+        ));
+    }
+
+    private long unitPrice(BuyQuote quote) {
+        return quote.amount() <= 0 ? 0L : quote.cost() / quote.amount();
+    }
+
+    private long safeAdd(long left, long right) {
+        try {
+            return Math.addExact(left, right);
+        } catch (ArithmeticException exception) {
+            return Long.MAX_VALUE;
+        }
     }
 }

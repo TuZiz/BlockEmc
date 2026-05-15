@@ -35,22 +35,29 @@ public final class BlockEmcPlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+        applyConfigDefaults();
         saveBundledResources();
+        try {
+            this.scheduler = new ServerScheduler(this);
+        } catch (IllegalStateException exception) {
+            getLogger().severe("Failed to initialize server scheduler safely: " + exception.getMessage());
+            getServer().getPluginManager().disablePlugin(this);
+            return;
+        }
 
         this.settings = PluginSettings.load(getConfig());
         this.storageSettings = StorageSettings.load(getConfig());
         this.messages = new MessageService(this);
         this.guiConfigLoader = new GuiConfigLoader();
-        this.valueRegistry = new ValueRegistry(this);
+        this.valueRegistry = new ValueRegistry(this, settings);
         this.valueRegistry.reload();
         this.shopRegistry = new ShopRegistry(this, guiConfigLoader, valueRegistry);
         this.shopRegistry.reload();
-        this.accountService = new AccountService(this, storageSettings);
+        this.accountService = new AccountService(this, storageSettings, settings);
         this.accountService.reload();
         this.accountService.startAutoSave();
 
-        this.exchangeService = new ExchangeService(settings, valueRegistry, accountService);
-        this.scheduler = new ServerScheduler(this);
+        this.exchangeService = new ExchangeService(this, settings, valueRegistry, accountService, scheduler);
         this.guiService = new GuiService(scheduler, messages, valueRegistry, shopRegistry, accountService, exchangeService);
         reloadGuiLayouts();
 
@@ -76,11 +83,14 @@ public final class BlockEmcPlugin extends JavaPlugin {
 
     public void reloadPluginState() {
         reloadConfig();
+        applyConfigDefaults();
         messages.reload();
         settings = PluginSettings.load(getConfig());
         storageSettings = StorageSettings.load(getConfig());
+        valueRegistry.updateSettings(settings);
         valueRegistry.reload();
         shopRegistry.reload();
+        accountService.applyPluginSettings(settings);
         accountService.applyStorageSettings(storageSettings);
         accountService.reload();
         exchangeService.updateSettings(settings);
@@ -128,6 +138,25 @@ public final class BlockEmcPlugin extends JavaPlugin {
         )) {
             saveResourceIfMissing(resource);
         }
+    }
+
+    private void applyConfigDefaults() {
+        getConfig().addDefault("security.sell-custom-items", false);
+        getConfig().addDefault("security.strict-item-match", true);
+        getConfig().addDefault("limits.max-single-price", PluginSettings.DEFAULT_MAX_SINGLE_PRICE);
+        getConfig().addDefault("limits.max-transaction-amount", PluginSettings.DEFAULT_MAX_TRANSACTION_AMOUNT);
+        getConfig().addDefault("limits.max-balance", PluginSettings.DEFAULT_MAX_BALANCE);
+        getConfig().addDefault("storage.mysql.username", "blockemc");
+        getConfig().addDefault("storage.mysql.password", "CHANGE_ME");
+        getConfig().addDefault("storage.mysql.use-ssl", true);
+        getConfig().addDefault("storage.mysql.allow-public-key-retrieval", false);
+        getConfig().addDefault("storage.mysql.pool.maximum-pool-size", 10);
+        getConfig().addDefault("storage.mysql.pool.minimum-idle", 2);
+        getConfig().addDefault("storage.mysql.pool.connection-timeout-ms", 10_000L);
+        getConfig().addDefault("storage.mysql.pool.idle-timeout-ms", 600_000L);
+        getConfig().addDefault("storage.mysql.pool.max-lifetime-ms", 1_800_000L);
+        getConfig().options().copyDefaults(true);
+        saveConfig();
     }
 
     private void saveResourceIfMissing(String path) {

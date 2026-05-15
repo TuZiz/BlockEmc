@@ -1,6 +1,8 @@
 package com.blockemc.service;
 
+import com.blockemc.model.PluginSettings;
 import com.blockemc.model.StorageSettings;
+import com.blockemc.service.audit.TransactionAuditRecord;
 import com.blockemc.service.storage.AccountSnapshot;
 import com.blockemc.service.storage.AccountStorage;
 import com.blockemc.service.storage.AccountStorageException;
@@ -9,6 +11,10 @@ import com.blockemc.service.storage.PlayerAccountState;
 import com.blockemc.service.storage.SharedAccountGlobalState;
 import com.blockemc.service.storage.SharedAccountStorage;
 import com.blockemc.service.storage.YamlAccountStorage;
+import com.blockemc.util.AmountUtil;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.time.LocalDate;
 import java.util.Comparator;
 import java.util.EnumSet;
@@ -17,6 +23,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -26,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 import java.util.logging.Level;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -84,14 +93,20 @@ public final class AccountService {
     });
     private final AtomicBoolean dirty = new AtomicBoolean(false);
     private volatile StorageSettings storageSettings;
+    private volatile PluginSettings pluginSettings;
     private volatile AccountStorage storage;
     private volatile ScheduledFuture<?> backgroundTask;
     private volatile boolean backgroundTaskStarted;
 
-    public AccountService(JavaPlugin plugin, StorageSettings storageSettings) {
+    public AccountService(JavaPlugin plugin, StorageSettings storageSettings, PluginSettings pluginSettings) {
         this.plugin = plugin;
         this.storageSettings = storageSettings;
+        this.pluginSettings = pluginSettings;
         this.storage = createStorage(storageSettings);
+    }
+
+    public void applyPluginSettings(PluginSettings pluginSettings) {
+        this.pluginSettings = pluginSettings;
     }
 
     public synchronized void applyStorageSettings(StorageSettings newSettings) {
@@ -226,42 +241,168 @@ public final class AccountService {
         dailySales.remove(uniqueId);
     }
 
-    public synchronized long getBalance(UUID uniqueId) {
+    public CompletableFuture<Long> getBalance(UUID uniqueId) {
+        SharedAccountStorage sharedStorage = sharedStorage();
+        if (sharedStorage == null) {
+            return CompletableFuture.completedFuture(getCachedBalance(uniqueId));
+        }
+        return supplyAccountIO(() -> {
+            try {
+                long balance = sharedStorage.getBalance(uniqueId);
+                synchronized (this) {
+                    balances.put(uniqueId, balance);
+                    globalBalances.put(uniqueId, balance);
+                }
+                return balance;
+            } catch (AccountStorageException exception) {
+                throw new CompletionException(exception);
+            }
+        });
+    }
+
+    public synchronized long getCachedBalance(UUID uniqueId) {
         return balances.getOrDefault(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
     }
 
-    public synchronized long setBalance(UUID uniqueId, String name, long amount) {
-        long normalized = Math.max(0L, amount);
-        names.put(uniqueId, name);
-        balances.put(uniqueId, normalized);
-        globalNames.put(uniqueId, name);
-        globalBalances.put(uniqueId, normalized);
-        submitStorageUpdate("set shared EMC balance", storage -> storage.setBalance(uniqueId, name, normalized));
-        return normalized;
+    public CompletableFuture<Boolean> setBalance(UUID uniqueId, long amount) {
+        String name = names.getOrDefault(uniqueId, globalNames.getOrDefault(uniqueId, uniqueId.toString()));
+        return setBalance(uniqueId, name, amount);
     }
 
-    public synchronized long addBalance(UUID uniqueId, String name, long amount) {
-        long delta = Math.max(0L, amount);
-        long current = balances.getOrDefault(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
-        long next = current + delta;
-        names.put(uniqueId, name);
-        balances.put(uniqueId, next);
-        globalNames.put(uniqueId, name);
-        globalBalances.put(uniqueId, next);
-        submitStorageUpdate("increment shared EMC balance", storage -> storage.addBalance(uniqueId, name, delta));
-        return next;
+    public CompletableFuture<Boolean> setBalance(UUID uniqueId, String name, long amount) {
+        long normalized = normalizeBalanceAmount(amount);
+        return supplyAccountIO(() -> {
+            SharedAccountStorage sharedStorage = sharedStorage();
+            try {
+                if (sharedStorage != null) {
+                    sharedStorage.setBalance(uniqueId, name, normalized);
+                }
+                synchronized (this) {
+                    AccountSnapshot before = sharedStorage == null ? snapshotLocked() : null;
+                    names.put(uniqueId, name);
+                    balances.put(uniqueId, normalized);
+                    globalNames.put(uniqueId, name);
+                    globalBalances.put(uniqueId, normalized);
+                    if (sharedStorage == null) {
+                        try {
+                            copyLocalToGlobalLocked();
+                            saveLocalSnapshotLocked();
+                        } catch (AccountStorageException exception) {
+                            populateLocalStateLocked(before);
+                            copyLocalToGlobalLocked();
+                            throw exception;
+                        }
+                    }
+                }
+                return true;
+            } catch (AccountStorageException exception) {
+                throw new CompletionException(exception);
+            }
+        });
     }
 
-    public synchronized long takeBalance(UUID uniqueId, String name, long amount) {
-        long delta = Math.max(0L, amount);
-        long current = balances.getOrDefault(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
-        long next = Math.max(0L, current - delta);
-        names.put(uniqueId, name);
-        balances.put(uniqueId, next);
-        globalNames.put(uniqueId, name);
-        globalBalances.put(uniqueId, next);
-        submitStorageUpdate("decrement shared EMC balance", storage -> storage.takeBalance(uniqueId, name, delta));
-        return next;
+    public CompletableFuture<Boolean> tryAddBalance(UUID uniqueId, long amount) {
+        String name = names.getOrDefault(uniqueId, globalNames.getOrDefault(uniqueId, uniqueId.toString()));
+        return tryAddBalance(uniqueId, name, amount);
+    }
+
+    public CompletableFuture<Boolean> tryAddBalance(UUID uniqueId, String name, long amount) {
+        if (amount <= 0L) {
+            return CompletableFuture.completedFuture(false);
+        }
+        return supplyAccountIO(() -> {
+            SharedAccountStorage sharedStorage = sharedStorage();
+            try {
+                boolean success;
+                long next;
+                if (sharedStorage != null) {
+                    success = sharedStorage.tryAddBalance(uniqueId, name, amount, pluginSettings.maxBalance());
+                    next = success ? sharedStorage.getBalance(uniqueId) : getCachedBalance(uniqueId);
+                } else {
+                    synchronized (this) {
+                        AccountSnapshot before = snapshotLocked();
+                        long current = balances.getOrDefault(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
+                        next = AmountUtil.checkedAddBalance(current, amount, pluginSettings.maxBalance());
+                        names.put(uniqueId, name);
+                        balances.put(uniqueId, next);
+                        globalNames.put(uniqueId, name);
+                        globalBalances.put(uniqueId, next);
+                        try {
+                            copyLocalToGlobalLocked();
+                            saveLocalSnapshotLocked();
+                        } catch (AccountStorageException exception) {
+                            populateLocalStateLocked(before);
+                            copyLocalToGlobalLocked();
+                            throw exception;
+                        }
+                    }
+                    success = true;
+                }
+                if (success) {
+                    synchronized (this) {
+                        names.put(uniqueId, name);
+                        balances.put(uniqueId, next);
+                        globalNames.put(uniqueId, name);
+                        globalBalances.put(uniqueId, next);
+                    }
+                }
+                return success;
+            } catch (AccountStorageException | ArithmeticException exception) {
+                throw new CompletionException(exception);
+            }
+        });
+    }
+
+    public CompletableFuture<Boolean> tryTakeBalance(UUID uniqueId, long amount) {
+        String name = names.getOrDefault(uniqueId, globalNames.getOrDefault(uniqueId, uniqueId.toString()));
+        return tryTakeBalance(uniqueId, name, amount);
+    }
+
+    public CompletableFuture<Boolean> tryTakeBalance(UUID uniqueId, String name, long amount) {
+        if (amount <= 0L) {
+            return CompletableFuture.completedFuture(false);
+        }
+        return supplyAccountIO(() -> {
+            SharedAccountStorage sharedStorage = sharedStorage();
+            try {
+                boolean success;
+                long next;
+                if (sharedStorage != null) {
+                    success = sharedStorage.tryTakeBalance(uniqueId, name, amount);
+                    next = success ? sharedStorage.getBalance(uniqueId) : getCachedBalance(uniqueId);
+                } else {
+                    synchronized (this) {
+                        AccountSnapshot before = snapshotLocked();
+                        long current = balances.getOrDefault(uniqueId, globalBalances.getOrDefault(uniqueId, 0L));
+                        next = AmountUtil.checkedSubtractBalance(current, amount);
+                        names.put(uniqueId, name);
+                        balances.put(uniqueId, next);
+                        globalNames.put(uniqueId, name);
+                        globalBalances.put(uniqueId, next);
+                        try {
+                            copyLocalToGlobalLocked();
+                            saveLocalSnapshotLocked();
+                        } catch (AccountStorageException exception) {
+                            populateLocalStateLocked(before);
+                            copyLocalToGlobalLocked();
+                            throw exception;
+                        }
+                    }
+                    success = true;
+                }
+                if (success) {
+                    synchronized (this) {
+                        names.put(uniqueId, name);
+                        balances.put(uniqueId, next);
+                        globalNames.put(uniqueId, name);
+                        globalBalances.put(uniqueId, next);
+                    }
+                }
+                return success;
+            } catch (AccountStorageException | ArithmeticException exception) {
+                throw new CompletionException(exception);
+            }
+        });
     }
 
     public synchronized boolean toggleFavorite(UUID uniqueId, Material material) {
@@ -300,7 +441,12 @@ public final class AccountService {
         names.put(uniqueId, name);
         globalNames.put(uniqueId, name);
         DailySaleData data = getOrCreateTodayData(uniqueId);
-        data.soldEmc += soldEmc;
+        try {
+            data.soldEmc = Math.addExact(data.soldEmc, soldEmc);
+        } catch (ArithmeticException exception) {
+            data.soldEmc = Long.MAX_VALUE;
+            plugin.getLogger().warning("Daily EMC sale total overflowed for " + uniqueId + "; clamped to Long.MAX_VALUE.");
+        }
         for (Map.Entry<Material, Integer> entry : soldMaterials.entrySet()) {
             if (entry.getValue() <= 0) {
                 continue;
@@ -324,6 +470,21 @@ public final class AccountService {
             globalPurchaseHeat.merge(material.name(), amount, Integer::sum);
         }
         submitStorageUpdate("record shared purchase heat", storage -> storage.recordPurchase(uniqueId, name, material, amount));
+    }
+
+    public void recordAudit(TransactionAuditRecord record) {
+        executor.execute(() -> {
+            SharedAccountStorage sharedStorage = sharedStorage();
+            try {
+                if (sharedStorage != null) {
+                    sharedStorage.recordAudit(record);
+                } else {
+                    writeLocalAudit(record);
+                }
+            } catch (Exception exception) {
+                plugin.getLogger().log(Level.WARNING, "Failed to write transaction audit log", exception);
+            }
+        });
     }
 
     public synchronized DailySaleSummary getTodaySummary(UUID uniqueId) {
@@ -467,6 +628,53 @@ public final class AccountService {
         synchronized (this) {
             return snapshotLocked();
         }
+    }
+
+    private <T> CompletableFuture<T> supplyAccountIO(Supplier<T> supplier) {
+        return CompletableFuture.supplyAsync(supplier, executor);
+    }
+
+    private long normalizeBalanceAmount(long amount) {
+        if (amount < 0L) {
+            return 0L;
+        }
+        return Math.min(amount, pluginSettings.maxBalance());
+    }
+
+    private void writeLocalAudit(TransactionAuditRecord record) throws IOException {
+        java.io.File auditDirectory = new java.io.File(plugin.getDataFolder(), "audit");
+        if (!auditDirectory.exists() && !auditDirectory.mkdirs()) {
+            throw new IOException("Failed to create audit directory");
+        }
+        java.io.File auditFile = new java.io.File(auditDirectory, "transactions.log");
+        String line = String.join("|",
+                record.transactionId(),
+                record.playerUuid() == null ? "" : record.playerUuid().toString(),
+                nullToEmpty(record.playerName()),
+                nullToEmpty(record.operationType()),
+                record.material() == null ? "" : record.material().name(),
+                String.valueOf(record.amount()),
+                String.valueOf(record.unitPrice()),
+                String.valueOf(record.totalPrice()),
+                String.valueOf(record.beforeBalance()),
+                String.valueOf(record.afterBalance()),
+                nullToEmpty(record.storageType()),
+                String.valueOf(record.success()),
+                nullToEmpty(record.failureReason()),
+                record.timestamp().toString(),
+                nullToEmpty(record.serverName())
+        ) + System.lineSeparator();
+        Files.writeString(auditFile.toPath(), line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value.replace('|', '/');
+    }
+
+    private void saveLocalSnapshotLocked() throws AccountStorageException {
+        AccountSnapshot snapshot = snapshotLocked();
+        storage.save(snapshot);
+        dirty.set(false);
     }
 
     private void reloadLocal() {

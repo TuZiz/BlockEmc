@@ -189,7 +189,7 @@ public final class GuiService {
                 case "hot" -> bindAction(view, slot, player, icon, click -> openHotInternal(player, 1, true));
                 case "bulk_sell" -> bindAction(view, slot, player, icon, click -> openBulkSellInternal(player, true));
                 case "favorites" -> bindAction(view, slot, player, icon, click -> openFavoritesInternal(player, 1, true));
-                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getBalance(player.getUniqueId())));
+                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getCachedBalance(player.getUniqueId())));
                 case "back", "close" -> bindAction(view, slot, player, icon, click -> player.closeInventory());
                 case "item", "input" -> {
                 }
@@ -215,7 +215,7 @@ public final class GuiService {
                 case "last" -> bindPageAction(view, slot, player, icon, page.hasPrevious(), click -> openCategoriesInternal(player, page.page() - 1, false));
                 case "next" -> bindPageAction(view, slot, player, icon, page.hasNext(), click -> openCategoriesInternal(player, page.page() + 1, false));
                 case "back" -> bindAction(view, slot, player, icon, click -> goBackOrClose(player));
-                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getBalance(player.getUniqueId())));
+                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getCachedBalance(player.getUniqueId())));
                 case "temporary" -> {
                     setItem(view.inventory(), slot, player, icon.resolve(false));
                     if (temporaryShop != null && !temporaryShop.materials().isEmpty()) {
@@ -260,7 +260,7 @@ public final class GuiService {
                 case "last" -> bindPageAction(view, slot, player, icon, page.hasPrevious(), click -> openFavoritesInternal(player, page.page() - 1, false));
                 case "next" -> bindPageAction(view, slot, player, icon, page.hasNext(), click -> openFavoritesInternal(player, page.page() + 1, false));
                 case "back" -> bindAction(view, slot, player, icon, click -> goBackOrClose(player));
-                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getBalance(player.getUniqueId())));
+                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getCachedBalance(player.getUniqueId())));
                 case "item", "input" -> {
                 }
                 default -> setItem(view.inventory(), slot, player, icon.resolve(false));
@@ -412,7 +412,7 @@ public final class GuiService {
                 case "last" -> bindPageAction(view, slot, player, icon, page.hasPrevious(), click -> openShopInternal(player, shop.id(), page.page() - 1, false));
                 case "next" -> bindPageAction(view, slot, player, icon, page.hasNext(), click -> openShopInternal(player, shop.id(), page.page() + 1, false));
                 case "back" -> bindAction(view, slot, player, icon, click -> goBackOrClose(player));
-                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getBalance(player.getUniqueId())));
+                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getCachedBalance(player.getUniqueId())));
                 case "item", "input" -> {
                 }
                 default -> setItem(view.inventory(), slot, player, icon.resolve(false));
@@ -448,7 +448,7 @@ public final class GuiService {
             switch (icon.function()) {
                 case "sell" -> bindAction(view, slot, player, icon, click -> handleBulkSellClick(player, view));
                 case "back" -> bindAction(view, slot, player, icon, click -> goBackOrClose(player));
-                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getBalance(player.getUniqueId())));
+                case "status" -> bindAction(view, slot, player, icon, click -> messages.send(player, "uemc-balance", accountService.getCachedBalance(player.getUniqueId())));
                 case "item", "input" -> {
                 }
                 default -> setItem(view.inventory(), slot, player, icon.resolve(false));
@@ -545,14 +545,20 @@ public final class GuiService {
                 reopenAction.run();
             }
             case DROP -> {
-                TradeResult result = exchangeService.sell(player, value.material(), 1);
-                messages.send(player, result.messageKey(), result.args());
-                reopenAction.run();
+                exchangeService.sell(player, value.material(), 1).thenAccept(result ->
+                        scheduler.runForPlayer(player, () -> {
+                            messages.send(player, result.messageKey(), result.args());
+                            reopenAction.run();
+                        })
+                );
             }
             case CONTROL_DROP -> {
-                TradeResult result = exchangeService.sellAll(player, value.material());
-                messages.send(player, result.messageKey(), result.args());
-                reopenAction.run();
+                exchangeService.sellAll(player, value.material()).thenAccept(result ->
+                        scheduler.runForPlayer(player, () -> {
+                            messages.send(player, result.messageKey(), result.args());
+                            reopenAction.run();
+                        })
+                );
             }
             default -> {
             }
@@ -577,27 +583,31 @@ public final class GuiService {
                     List.of(
                             "&7本次将购买: &f" + quote.amount() + " &7个",
                             "&7预计消耗: &6" + quote.cost() + " EMC",
-                            "&7当前余额: &f" + accountService.getBalance(player.getUniqueId()) + " EMC",
+                            "&7当前余额: &f" + accountService.getCachedBalance(player.getUniqueId()) + " EMC",
                             "",
                             "&c这是一次高价值交易，请确认后继续。"
                     ),
                     confirmed -> {
-                        TradeResult result = maximum
+                        (maximum
                                 ? exchangeService.buyMaximum(confirmed, material, amount)
-                                : exchangeService.buy(confirmed, material, quote.amount());
-                        messages.send(confirmed, result.messageKey(), result.args());
-                        reopenAction.run();
+                                : exchangeService.buy(confirmed, material, quote.amount()))
+                                .thenAccept(result -> scheduler.runForPlayer(confirmed, () -> {
+                                    messages.send(confirmed, result.messageKey(), result.args());
+                                    reopenAction.run();
+                                }));
                     },
                     cancelled -> reopenAction.run()
             );
             return;
         }
 
-        TradeResult result = maximum
+        (maximum
                 ? exchangeService.buyMaximum(player, material, amount)
-                : exchangeService.buy(player, material, quote.amount());
-        messages.send(player, result.messageKey(), result.args());
-        reopenAction.run();
+                : exchangeService.buy(player, material, quote.amount()))
+                .thenAccept(result -> scheduler.runForPlayer(player, () -> {
+                    messages.send(player, result.messageKey(), result.args());
+                    reopenAction.run();
+                }));
     }
     private void handleBulkSellClick(Player player, MenuView view) {
         ExchangeService.BulkSellQuote quote = exchangeService.previewBulkSell(view.inventory(), bulkSellLayout.inputSlots());
@@ -629,18 +639,24 @@ public final class GuiService {
                     "&a&l批量出售确认",
                     summary,
                     confirmed -> {
-                        TradeResult result = exchangeService.bulkSell(confirmed, view.inventory(), bulkSellLayout.inputSlots());
-                        messages.send(confirmed, result.messageKey(), result.args());
-                        openBulkSellInternal(confirmed, false);
+                        exchangeService.bulkSell(confirmed, view.inventory(), bulkSellLayout.inputSlots()).thenAccept(result ->
+                                scheduler.runForPlayer(confirmed, () -> {
+                                    messages.send(confirmed, result.messageKey(), result.args());
+                                    openBulkSellInternal(confirmed, false);
+                                })
+                        );
                     },
                     cancelled -> reopenExistingView(cancelled, view, reopened -> openBulkSellInternal(reopened, false))
             );
             return;
         }
 
-        TradeResult result = exchangeService.bulkSell(player, view.inventory(), bulkSellLayout.inputSlots());
-        messages.send(player, result.messageKey(), result.args());
-        refreshStatusItems(player, view.inventory(), bulkSellLayout);
+        exchangeService.bulkSell(player, view.inventory(), bulkSellLayout.inputSlots()).thenAccept(result ->
+                scheduler.runForPlayer(player, () -> {
+                    messages.send(player, result.messageKey(), result.args());
+                    refreshStatusItems(player, view.inventory(), bulkSellLayout);
+                })
+        );
     }
     private void cycleMaterialCategory(Player player, MaterialValue value) {
         List<String> shopIds = shopRegistry.getOrderedShopIdsForAdmin();
@@ -952,7 +968,7 @@ public final class GuiService {
             return "";
         }
         AccountService.DailySaleSummary summary = accountService.getTodaySummary(player.getUniqueId());
-        return ColorUtil.color(text.replace("%emc%", String.valueOf(accountService.getBalance(player.getUniqueId())))
+        return ColorUtil.color(text.replace("%emc%", String.valueOf(accountService.getCachedBalance(player.getUniqueId())))
                 .replace("%player%", player.getName())
                 .replace("%today_emc%", String.valueOf(summary.soldEmc()))
                 .replace("%today_top_amount%", String.valueOf(summary.topMaterialAmount()))
@@ -972,4 +988,3 @@ public final class GuiService {
         return new PageSlice<>(entries.subList(from, to), page, page > 1, page < totalPages);
     }
 }
-
