@@ -75,6 +75,9 @@ public final class ExchangeService {
     }
 
     public BuyQuote quoteBuy(Player player, Material material, int amount) {
+        if (!ItemStackUtil.isUsableItemMaterial(material)) {
+            return BuyQuote.failure("uemc-material-not-supported");
+        }
         MaterialValue value = valueRegistry.get(material).orElse(null);
         if (value == null || valueRegistry.isHidden(material)) {
             return BuyQuote.failure("uemc-material-not-supported");
@@ -99,14 +102,16 @@ public final class ExchangeService {
             return BuyQuote.failure("uemc-emc-not-enough", cost);
         }
 
-        ItemStack stack = new ItemStack(material, safeAmount);
-        if (!ItemStackUtil.canFit(player.getInventory(), stack)) {
+        if (!ItemStackUtil.canFit(player.getInventory(), material, safeAmount)) {
             return BuyQuote.failure("uemc-inventory-full");
         }
         return BuyQuote.success(material, safeAmount, cost);
     }
 
     public BuyQuote quoteBuyMaximum(Player player, Material material, int cap) {
+        if (!ItemStackUtil.isUsableItemMaterial(material)) {
+            return BuyQuote.failure("uemc-material-not-supported");
+        }
         MaterialValue value = valueRegistry.get(material).orElse(null);
         if (value == null || valueRegistry.isHidden(material)) {
             return BuyQuote.failure("uemc-material-not-supported");
@@ -178,6 +183,9 @@ public final class ExchangeService {
     }
 
     public CompletableFuture<TradeResult> sell(Player player, Material material, int amount) {
+        if (!ItemStackUtil.isUsableItemMaterial(material)) {
+            return CompletableFuture.completedFuture(TradeResult.failure("uemc-material-not-supported"));
+        }
         MaterialValue value = valueRegistry.get(material).orElse(null);
         if (value == null) {
             return CompletableFuture.completedFuture(TradeResult.failure("uemc-material-not-supported"));
@@ -329,7 +337,7 @@ public final class ExchangeService {
     }
 
     public boolean isSellable(ItemStack itemStack) {
-        if (itemStack == null || itemStack.getType() == Material.AIR) {
+        if (itemStack == null || !ItemStackUtil.isUsableItemMaterial(itemStack.getType())) {
             return false;
         }
         MaterialValue value = valueRegistry.get(itemStack.getType()).orElse(null);
@@ -345,7 +353,7 @@ public final class ExchangeService {
 
     private void finishPurchasedItemDelivery(Player player, BuyQuote quote, CompletableFuture<TradeResult> result) {
         try {
-            ItemStack stack = new ItemStack(quote.material(), quote.amount());
+            ItemStack stack = ItemStackUtil.createTradeItem(quote.material(), quote.amount());
             if (!ItemStackUtil.canFit(player.getInventory(), stack)) {
                 compensatePurchase(player, quote.cost(), "inventory changed before delivery");
                 audit(player, "BUY", quote.material(), quote.amount(), unitPrice(quote), quote.cost(), false, "inventory full");
@@ -461,7 +469,7 @@ public final class ExchangeService {
                 return;
             }
             completeSellCredit(player, transaction, () -> {
-                ItemStackUtil.giveOrDrop(player, new ItemStack(material, amount));
+                ItemStackUtil.giveOrDrop(player, ItemStackUtil.createTradeItem(material, amount));
                 audit(player, "SELL", material, amount, unitPrice, transaction.reward(), false, "balance add rejected");
             }, () -> {
                 accountService.recordSale(player.getUniqueId(), player.getName(), Map.of(material, amount), transaction.reward());
@@ -621,7 +629,7 @@ public final class ExchangeService {
 
     private void returnBulkMaterials(Player player, BulkSellQuote quote) {
         for (Map.Entry<Material, Integer> entry : quote.soldMaterials().entrySet()) {
-            ItemStackUtil.giveOrDrop(player, new ItemStack(entry.getKey(), entry.getValue()));
+            ItemStackUtil.giveOrDrop(player, ItemStackUtil.createTradeItem(entry.getKey(), entry.getValue()));
         }
     }
 

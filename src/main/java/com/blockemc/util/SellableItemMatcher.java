@@ -20,10 +20,13 @@ public final class SellableItemMatcher {
             boolean strictItemMatch,
             boolean sellCustomItems
     ) {
-        if (stack == null || expectedType == null || expectedType == Material.AIR) {
+        if (!ItemStackUtil.isUsableItemMaterial(expectedType)) {
             return false;
         }
-        if (stack.getType() != expectedType || stack.getType() == Material.AIR) {
+        if (stack == null || !ItemStackUtil.isUsableItemMaterial(stack.getType())) {
+            return false;
+        }
+        if (stack.getType() != expectedType) {
             return false;
         }
         if (sellCustomItems || !strictItemMatch) {

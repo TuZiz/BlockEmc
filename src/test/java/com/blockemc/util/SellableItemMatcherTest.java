@@ -85,4 +85,15 @@ class SellableItemMatcherTest {
         assertEquals(0, ItemStackUtil.countMatching(inventory, Material.STONE, true, false));
         assertEquals(16, inventory.getItem(1).getAmount());
     }
+
+    @Test
+    void nonItemMaterialNeverMatchesOrFits() {
+        Inventory inventory = Bukkit.createInventory(null, 9);
+
+        assertFalse(Material.CAVE_VINES.isItem());
+        assertEquals(0, ItemStackUtil.maxFit(inventory, Material.CAVE_VINES, 64));
+        assertEquals(0, ItemStackUtil.countMatching(inventory, Material.CAVE_VINES, true, false));
+        assertFalse(ItemStackUtil.removeMatching(inventory, Material.CAVE_VINES, 1, true, false));
+        assertFalse(SellableItemMatcher.isPlainSellable(new ItemStack(Material.STONE), Material.CAVE_VINES));
+    }
 }

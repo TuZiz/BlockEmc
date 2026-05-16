@@ -26,7 +26,7 @@ public final class ItemStackUtil {
 
     public static ItemStack createItem(Material material, String name, List<String> lore) {
         Material target = Objects.requireNonNullElse(material, Material.STONE);
-        if (!target.isItem()) {
+        if (!isUsableItemMaterial(target)) {
             target = Material.BARRIER;
         }
         ItemStack stack = new ItemStack(target);
@@ -43,6 +43,17 @@ public final class ItemStackUtil {
         return stack;
     }
 
+    public static boolean isUsableItemMaterial(Material material) {
+        return material != null && material != Material.AIR && material.isItem();
+    }
+
+    public static ItemStack createTradeItem(Material material, int amount) {
+        if (!isUsableItemMaterial(material)) {
+            throw new IllegalArgumentException("Material is not a usable item: " + material);
+        }
+        return new ItemStack(material, amount);
+    }
+
     public static String prettifyMaterial(Material material) {
         String[] parts = material.name().toLowerCase(Locale.ROOT).split("_");
         List<String> words = new ArrayList<>();
@@ -56,10 +67,20 @@ public final class ItemStackUtil {
     }
 
     public static boolean canFit(Inventory inventory, ItemStack stack) {
+        if (inventory == null || stack == null || !isUsableItemMaterial(stack.getType()) || stack.getAmount() <= 0) {
+            return false;
+        }
         return maxFit(inventory, stack.getType(), stack.getAmount()) >= stack.getAmount();
     }
 
+    public static boolean canFit(Inventory inventory, Material material, int amount) {
+        return amount > 0 && maxFit(inventory, material, amount) >= amount;
+    }
+
     public static int maxFit(Inventory inventory, Material material, int cap) {
+        if (inventory == null || !isUsableItemMaterial(material) || cap <= 0) {
+            return 0;
+        }
         int remaining = Math.max(0, cap);
         int maxStack = material.getMaxStackSize();
         for (ItemStack content : inventory.getStorageContents()) {
@@ -83,6 +104,9 @@ public final class ItemStackUtil {
     }
 
     public static int countMatching(Inventory inventory, Material material, boolean strictItemMatch, boolean sellCustomItems) {
+        if (inventory == null || !isUsableItemMaterial(material)) {
+            return 0;
+        }
         int total = 0;
         for (ItemStack content : inventory.getStorageContents()) {
             if (!SellableItemMatcher.isPlainSellable(content, material, strictItemMatch, sellCustomItems)) {
@@ -104,6 +128,9 @@ public final class ItemStackUtil {
             boolean strictItemMatch,
             boolean sellCustomItems
     ) {
+        if (inventory == null || !isUsableItemMaterial(material) || amount <= 0) {
+            return false;
+        }
         if (countMatching(inventory, material, strictItemMatch, sellCustomItems) < amount) {
             return false;
         }

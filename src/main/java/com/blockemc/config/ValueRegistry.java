@@ -3,6 +3,7 @@ package com.blockemc.config;
 import com.blockemc.model.ExchangeMode;
 import com.blockemc.model.MaterialValue;
 import com.blockemc.model.PluginSettings;
+import com.blockemc.util.ItemStackUtil;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -96,6 +97,10 @@ public final class ValueRegistry {
                     plugin.getLogger().warning("跳过未知材质: " + key);
                     continue;
                 }
+                if (!ItemStackUtil.isUsableItemMaterial(material)) {
+                    plugin.getLogger().warning("Skipping non-item material in values.yml: " + material.name());
+                    continue;
+                }
                 long emc = valueSection.getLong(key);
                 if (emc <= 0L) {
                     plugin.getLogger().warning("Skipping non-positive EMC value for material " + material.name() + ": " + emc);
@@ -115,8 +120,10 @@ public final class ValueRegistry {
 
         for (String value : configuration.getStringList("hidden")) {
             Material material = Material.matchMaterial(value);
-            if (material != null) {
+            if (ItemStackUtil.isUsableItemMaterial(material)) {
                 hiddenMaterials.add(material);
+            } else if (material != null) {
+                plugin.getLogger().warning("Skipping non-item material in values.yml hidden list: " + material.name());
             }
         }
 
@@ -126,6 +133,10 @@ public final class ValueRegistry {
                 Material material = Material.matchMaterial(key);
                 if (material == null) {
                     plugin.getLogger().warning("分类覆盖中存在未知材质: " + key);
+                    continue;
+                }
+                if (!ItemStackUtil.isUsableItemMaterial(material)) {
+                    plugin.getLogger().warning("Skipping non-item material in values.yml categories: " + material.name());
                     continue;
                 }
                 String category = categorySection.getString(key, "").trim();
@@ -138,8 +149,10 @@ public final class ValueRegistry {
         YamlConfiguration temporaryConfiguration = YamlConfiguration.loadConfiguration(temporaryFile);
         for (String value : temporaryConfiguration.getStringList("materials")) {
             Material material = Material.matchMaterial(value);
-            if (material != null) {
+            if (ItemStackUtil.isUsableItemMaterial(material)) {
                 temporaryMaterials.add(material);
+            } else if (material != null) {
+                plugin.getLogger().warning("Skipping non-item material in temporary-materials.yml: " + material.name());
             }
         }
     }
@@ -175,6 +188,9 @@ public final class ValueRegistry {
     }
 
     public synchronized void set(Material material, long emc, ExchangeMode mode) {
+        if (!ItemStackUtil.isUsableItemMaterial(material)) {
+            throw new IllegalArgumentException("Material must be a usable item");
+        }
         if (emc <= 0L) {
             throw new IllegalArgumentException("EMC price must be greater than zero");
         }
@@ -195,12 +211,18 @@ public final class ValueRegistry {
     }
 
     public synchronized void addTemporaryMaterial(Material material) {
+        if (!ItemStackUtil.isUsableItemMaterial(material)) {
+            throw new IllegalArgumentException("Material must be a usable item");
+        }
         if (temporaryMaterials.add(material)) {
             saveTemporaryMaterials();
         }
     }
 
     public synchronized void setHidden(Material material, boolean hidden) {
+        if (!ItemStackUtil.isUsableItemMaterial(material)) {
+            throw new IllegalArgumentException("Material must be a usable item");
+        }
         if (hidden) {
             hiddenMaterials.add(material);
         } else {
@@ -210,6 +232,9 @@ public final class ValueRegistry {
     }
 
     public synchronized void setCategoryOverride(Material material, String categoryId) {
+        if (!ItemStackUtil.isUsableItemMaterial(material)) {
+            throw new IllegalArgumentException("Material must be a usable item");
+        }
         if (categoryId == null || categoryId.isBlank()) {
             categoryOverrides.remove(material);
         } else {

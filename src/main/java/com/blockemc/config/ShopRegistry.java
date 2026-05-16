@@ -91,8 +91,10 @@ public final class ShopRegistry {
                     continue;
                 }
                 Material material = Material.matchMaterial(value);
-                if (material != null) {
+                if (ItemStackUtil.isUsableItemMaterial(material)) {
                     defaultShopByMaterial.put(material, id);
+                } else if (material != null) {
+                    plugin.getLogger().warning("Skipping non-item material in shop " + id + ": " + material.name());
                 }
             }
         }
