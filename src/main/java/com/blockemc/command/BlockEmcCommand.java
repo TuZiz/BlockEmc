@@ -15,7 +15,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import org.bukkit.Bukkit;
+import java.util.UUID;
 import org.bukkit.Material;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -138,12 +138,12 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
             messages.send(sender, "uemc-balance", accountService.getCachedBalance(player.getUniqueId()));
             return true;
         }
-        Player target = Bukkit.getPlayerExact(args[1]);
+        AccountService.ActivePlayer target = accountService.findActivePlayer(args[1]).orElse(null);
         if (target == null) {
             messages.send(sender, "uemc-player-not-found", args[1]);
             return true;
         }
-        messages.send(sender, "uemc-balance", accountService.getCachedBalance(target.getUniqueId()));
+        messages.send(sender, "uemc-balance", accountService.getCachedBalance(target.uniqueId()));
         return true;
     }
 
@@ -290,7 +290,7 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
             return true;
         }
 
-        Player target = Bukkit.getPlayerExact(args[1]);
+        AccountService.ActivePlayer target = accountService.findActivePlayer(args[1]).orElse(null);
         if (target == null) {
             messages.send(sender, "uemc-player-not-found", args[1]);
             return true;
@@ -303,12 +303,12 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
 
         switch (action) {
             case "give" -> {
-                long before = accountService.getCachedBalance(target.getUniqueId());
-                accountService.tryAddBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
-                    runForSender(sender, target, () -> {
-                        auditAdmin(target, "ADMIN_GIVE", amount, before, success, success ? "" : "balance limit");
+                long before = accountService.getCachedBalance(target.uniqueId());
+                accountService.tryAddBalance(target.uniqueId(), target.name(), amount).thenAccept(success -> {
+                    runForSender(sender, () -> {
+                        auditAdmin(target.uniqueId(), target.name(), "ADMIN_GIVE", amount, before, success, success ? "" : "balance limit");
                         if (success) {
-                            messages.send(sender, "uemc-admin-add-player", target.getName(), amount, accountService.getCachedBalance(target.getUniqueId()));
+                            messages.send(sender, "uemc-admin-add-player", target.name(), amount, accountService.getCachedBalance(target.uniqueId()));
                         } else {
                             messages.send(sender, "uemc-amount-too-large");
                         }
@@ -316,21 +316,21 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
                 });
             }
             case "set" -> {
-                long before = accountService.getCachedBalance(target.getUniqueId());
-                accountService.setBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
-                    runForSender(sender, target, () -> {
-                        auditAdmin(target, "ADMIN_SET", amount, before, success, "");
-                        messages.send(sender, "uemc-admin-set-player", target.getName(), accountService.getCachedBalance(target.getUniqueId()));
+                long before = accountService.getCachedBalance(target.uniqueId());
+                accountService.setBalance(target.uniqueId(), target.name(), amount).thenAccept(success -> {
+                    runForSender(sender, () -> {
+                        auditAdmin(target.uniqueId(), target.name(), "ADMIN_SET", amount, before, success, "");
+                        messages.send(sender, "uemc-admin-set-player", target.name(), accountService.getCachedBalance(target.uniqueId()));
                     });
                 });
             }
             case "take" -> {
-                long before = accountService.getCachedBalance(target.getUniqueId());
-                accountService.tryTakeBalance(target.getUniqueId(), target.getName(), amount).thenAccept(success -> {
-                    runForSender(sender, target, () -> {
-                        auditAdmin(target, "ADMIN_TAKE", amount, before, success, success ? "" : "insufficient balance");
+                long before = accountService.getCachedBalance(target.uniqueId());
+                accountService.tryTakeBalance(target.uniqueId(), target.name(), amount).thenAccept(success -> {
+                    runForSender(sender, () -> {
+                        auditAdmin(target.uniqueId(), target.name(), "ADMIN_TAKE", amount, before, success, success ? "" : "insufficient balance");
                         if (success) {
-                            messages.send(sender, "uemc-admin-take-player", target.getName(), amount, accountService.getCachedBalance(target.getUniqueId()));
+                            messages.send(sender, "uemc-admin-take-player", target.name(), amount, accountService.getCachedBalance(target.uniqueId()));
                         } else {
                             messages.send(sender, "uemc-emc-not-enough", amount);
                         }
@@ -353,18 +353,18 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
         return false;
     }
 
-    private void auditAdmin(Player target, String operation, long amount, long before, boolean success, String reason) {
+    private void auditAdmin(UUID targetUuid, String targetName, String operation, long amount, long before, boolean success, String reason) {
         accountService.recordAudit(new TransactionAuditRecord(
                 java.util.UUID.randomUUID().toString(),
-                target.getUniqueId(),
-                target.getName(),
+                targetUuid,
+                targetName,
                 operation,
                 null,
                 0,
                 amount,
                 amount,
                 before,
-                accountService.getCachedBalance(target.getUniqueId()),
+                accountService.getCachedBalance(targetUuid),
                 accountService.getStorageDescription(),
                 success,
                 reason,
@@ -373,11 +373,9 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
         ));
     }
 
-    private void runForSender(CommandSender sender, Player target, Runnable task) {
+    private void runForSender(CommandSender sender, Runnable task) {
         if (sender instanceof Player player) {
             scheduler.runForPlayer(player, task);
-        } else if (target != null && target.isOnline()) {
-            scheduler.runForPlayer(target, task);
         } else {
             scheduler.runGlobal(task);
         }
@@ -437,7 +435,7 @@ public final class BlockEmcCommand implements CommandExecutor, TabCompleter {
             return filter(List.of("blocks"), args[1]);
         }
         if (args.length == 2 && List.of("give", "set", "take", "balance").contains(args[0].toLowerCase(Locale.ROOT))) {
-            return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[1]);
+            return filter(accountService.getActivePlayerNames(), args[1]);
         }
         if (args.length == 3 && "add".equalsIgnoreCase(args[0])) {
             return filter(List.of("both", "sell_only", "buy_only"), args[2]);

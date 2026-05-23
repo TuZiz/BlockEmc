@@ -66,7 +66,8 @@ public final class ServerScheduler implements SchedulerAdapter {
         try {
             Object scheduler = player.getClass().getMethod("getScheduler").invoke(player);
             Method execute = scheduler.getClass().getMethod("execute", Plugin.class, Runnable.class, Runnable.class, long.class);
-            execute.invoke(scheduler, plugin, runnable, null, 1L);
+            execute.invoke(scheduler, plugin, runnable, (Runnable) () -> {
+            }, 1L);
         } catch (ReflectiveOperationException exception) {
             throw new IllegalStateException("Folia player scheduler invocation failed", exception);
         }
@@ -82,7 +83,8 @@ public final class ServerScheduler implements SchedulerAdapter {
         try {
             Object scheduler = player.getClass().getMethod("getScheduler").invoke(player);
             Method runDelayed = scheduler.getClass().getMethod("runDelayed", Plugin.class, java.util.function.Consumer.class, Runnable.class, long.class);
-            runDelayed.invoke(scheduler, plugin, (java.util.function.Consumer<Object>) ignored -> task.run(), null, safeDelay);
+            runDelayed.invoke(scheduler, plugin, (java.util.function.Consumer<Object>) ignored -> task.run(), (Runnable) () -> {
+            }, safeDelay);
         } catch (ReflectiveOperationException exception) {
             throw new IllegalStateException("Folia delayed player scheduler invocation failed", exception);
         }

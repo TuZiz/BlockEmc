@@ -4,6 +4,7 @@ version: ${version}
 api-version: "26.1.2"
 authors: [ym]
 description: GUI EMC exchange plugin compatible with Spigot and Folia.
+folia-supported: true
 commands:
   uemc:
     description: Open the BlockEmc GUI or manage EMC data.

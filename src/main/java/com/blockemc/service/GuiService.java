@@ -30,6 +30,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
@@ -40,6 +42,8 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
 public final class GuiService {
+
+    private static final Logger LOGGER = Logger.getLogger("BlockEmc");
 
     private record PageSlice<T>(List<T> entries, int page, boolean hasPrevious, boolean hasNext) {
     }
@@ -59,6 +63,7 @@ public final class GuiService {
     private final Map<UUID, Deque<Consumer<Player>>> history = new HashMap<>();
     private final Map<UUID, Consumer<Player>> currentOpeners = new HashMap<>();
     private final Map<UUID, MenuView> openViews = new HashMap<>();
+    private final Map<UUID, Player> openPlayers = new ConcurrentHashMap<>();
     private final Set<UUID> suppressBulkReturn = ConcurrentHashMap.newKeySet();
     private final Map<UUID, PendingBulkSellConfirmation> pendingBulkConfirmations = new ConcurrentHashMap<>();
 
@@ -151,31 +156,35 @@ public final class GuiService {
 
         Player player = (Player) event.getPlayer();
         if (openViews.get(player.getUniqueId()) == view) {
-            if (!(player.getOpenInventory().getTopInventory().getHolder() instanceof MenuHolder)) {
-                openViews.remove(player.getUniqueId());
-                currentOpeners.remove(player.getUniqueId());
+                if (!(player.getOpenInventory().getTopInventory().getHolder() instanceof MenuHolder)) {
+                    openViews.remove(player.getUniqueId());
+                    openPlayers.remove(player.getUniqueId());
+                    currentOpeners.remove(player.getUniqueId());
+                }
             }
-        }
     }
 
     public void handleQuit(Player player) {
         history.remove(player.getUniqueId());
         currentOpeners.remove(player.getUniqueId());
         openViews.remove(player.getUniqueId());
+        openPlayers.remove(player.getUniqueId());
         suppressBulkReturn.remove(player.getUniqueId());
         pendingBulkConfirmations.remove(player.getUniqueId());
     }
 
     public void closeAll() {
-        for (UUID uniqueId : new ArrayList<>(openViews.keySet())) {
-            Player player = Bukkit.getPlayer(uniqueId);
-            if (player != null) {
-                player.closeInventory();
+        for (Player player : new ArrayList<>(openPlayers.values())) {
+            try {
+                scheduler.runForPlayer(player, player::closeInventory);
+            } catch (RuntimeException exception) {
+                LOGGER.log(Level.WARNING, "Failed to schedule inventory close for " + player.getUniqueId(), exception);
             }
         }
         history.clear();
         currentOpeners.clear();
         openViews.clear();
+        openPlayers.clear();
         suppressBulkReturn.clear();
         pendingBulkConfirmations.clear();
     }
@@ -686,12 +695,14 @@ public final class GuiService {
         }
         currentOpeners.put(uniqueId, opener);
         openViews.put(uniqueId, view);
+        openPlayers.put(uniqueId, player);
         scheduler.executePlayer(player, () -> player.openInventory(view.inventory()));
     }
 
     private void reopenExistingView(Player player, MenuView view, Consumer<Player> opener) {
         currentOpeners.put(player.getUniqueId(), opener);
         openViews.put(player.getUniqueId(), view);
+        openPlayers.put(player.getUniqueId(), player);
         scheduler.executePlayer(player, () -> player.openInventory(view.inventory()));
     }
 

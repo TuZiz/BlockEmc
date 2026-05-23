@@ -26,6 +26,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -41,7 +42,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.logging.Level;
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -60,6 +60,9 @@ public final class AccountService {
     }
 
     public record HotMaterialEntry(Material material, int purchases) {
+    }
+
+    public record ActivePlayer(UUID uniqueId, String name) {
     }
 
     private interface SharedStorageAction {
@@ -86,6 +89,7 @@ public final class AccountService {
     private final JavaPlugin plugin;
     private final Map<UUID, Long> balances = new ConcurrentHashMap<>();
     private final Map<UUID, String> names = new ConcurrentHashMap<>();
+    private final Map<UUID, String> activePlayerNames = new ConcurrentHashMap<>();
     private final Map<UUID, Set<Material>> favorites = new ConcurrentHashMap<>();
     private final Map<UUID, DailySaleData> dailySales = new ConcurrentHashMap<>();
     private final Map<String, Integer> purchaseHeat = new ConcurrentHashMap<>();
@@ -199,6 +203,7 @@ public final class AccountService {
     public synchronized void notePlayer(Player player) {
         UUID uniqueId = player.getUniqueId();
         String name = player.getName();
+        activePlayerNames.put(uniqueId, name);
         names.put(uniqueId, name);
         globalNames.put(uniqueId, name);
 
@@ -239,13 +244,33 @@ public final class AccountService {
     }
 
     public synchronized void handleQuit(UUID uniqueId) {
-        if (uniqueId == null || sharedStorage() == null) {
+        if (uniqueId == null) {
+            return;
+        }
+        activePlayerNames.remove(uniqueId);
+        if (sharedStorage() == null) {
             return;
         }
         balances.remove(uniqueId);
         names.remove(uniqueId);
         favorites.remove(uniqueId);
         dailySales.remove(uniqueId);
+    }
+
+    public List<String> getActivePlayerNames() {
+        return activePlayerNames.values().stream()
+                .sorted(String.CASE_INSENSITIVE_ORDER)
+                .toList();
+    }
+
+    public Optional<ActivePlayer> findActivePlayer(String name) {
+        if (name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        return activePlayerNames.entrySet().stream()
+                .filter(entry -> entry.getValue().equalsIgnoreCase(name))
+                .findFirst()
+                .map(entry -> new ActivePlayer(entry.getKey(), entry.getValue()));
     }
 
     public CompletableFuture<Long> getBalance(UUID uniqueId) {
@@ -1031,7 +1056,9 @@ public final class AccountService {
                 retainSharedActiveCachesLocked();
                 dirty.set(false);
             }
-            Bukkit.getOnlinePlayers().forEach(player -> executor.execute(() -> preloadPlayer(player.getUniqueId(), player.getName())));
+            for (ActivePlayer player : activePlayerSnapshot()) {
+                executor.execute(() -> preloadPlayer(player.uniqueId(), player.name()));
+            }
         } catch (AccountStorageException exception) {
             throw new IllegalStateException("Failed to load account data from " + storageSettings.describe(), exception);
         }
@@ -1067,13 +1094,17 @@ public final class AccountService {
     }
 
     private void retainSharedActiveCachesLocked() {
-        Set<UUID> onlinePlayers = Bukkit.getOnlinePlayers().stream()
-                .map(Player::getUniqueId)
-                .collect(java.util.stream.Collectors.toSet());
-        balances.keySet().retainAll(onlinePlayers);
-        names.keySet().retainAll(onlinePlayers);
-        favorites.keySet().retainAll(onlinePlayers);
-        dailySales.keySet().retainAll(onlinePlayers);
+        Set<UUID> activePlayers = Set.copyOf(activePlayerNames.keySet());
+        balances.keySet().retainAll(activePlayers);
+        names.keySet().retainAll(activePlayers);
+        favorites.keySet().retainAll(activePlayers);
+        dailySales.keySet().retainAll(activePlayers);
+    }
+
+    private List<ActivePlayer> activePlayerSnapshot() {
+        return activePlayerNames.entrySet().stream()
+                .map(entry -> new ActivePlayer(entry.getKey(), entry.getValue()))
+                .toList();
     }
 
     private void applySharedPlayerStateLocked(UUID uniqueId, PlayerAccountState state, String fallbackName) {
